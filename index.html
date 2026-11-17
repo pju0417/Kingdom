@@ -1,0 +1,1383 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>그레이트 킹덤 GREAT KINGDOM</title></head>
+<body style="margin:0;background:#0b0a08"><div id="app"></div>
+<script>
+/* =========================================================
+   GREAT KINGDOM — 엔진 (규칙 판정)
+   ========================================================= */
+const GK_N = 9;
+const GK_CENTER = 40;
+const GK_EMPTY = 0, GK_BLUE = 1, GK_ORANGE = 2, GK_NEUTRAL = 3;
+const GK_COLS = 'ABCDEFGHI';
+const GK_NAME = { 1: '파랑', 2: '주황' };
+
+function gkNew() {
+  const board = new Array(81).fill(GK_EMPTY);
+  board[GK_CENTER] = GK_NEUTRAL;
+  return { board, turn: GK_BLUE, passes: 0, stones: { 1: 40, 2: 40 }, moves: [], lastMove: -1, over: null };
+}
+
+function gkCoord(i) { return GK_COLS[i % GK_N] + (Math.floor(i / GK_N) + 1); }
+
+function gkNbrs(i) {
+  const r = Math.floor(i / GK_N), c = i % GK_N, a = [];
+  if (r > 0) a.push(i - GK_N);
+  if (r < GK_N - 1) a.push(i + GK_N);
+  if (c > 0) a.push(i - 1);
+  if (c < GK_N - 1) a.push(i + 1);
+  return a;
+}
+
+// 같은 색으로 이어진 성 무리 + 그 무리에 맞닿은 빈칸(숨구멍)
+function gkGroup(b, i) {
+  const col = b[i], seen = new Set([i]), stack = [i], libs = new Set();
+  while (stack.length) {
+    const j = stack.pop();
+    for (const k of gkNbrs(j)) {
+      if (b[k] === GK_EMPTY) libs.add(k);
+      else if (b[k] === col && !seen.has(k)) { seen.add(k); stack.push(k); }
+    }
+  }
+  return { stones: [...seen], libs };
+}
+
+// 영토 계산: 빈칸 영역이 한 색의 성(+가장자리/중립 성)으로만 둘러싸이고,
+// 가장자리 4변을 모두 쓰지 않았으면 그 색의 영토
+function gkTerritory(b) {
+  const owner = new Array(81).fill(0), seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== GK_EMPTY || seen[i]) continue;
+    const cells = [], stack = [i], border = new Set(), edges = new Set();
+    seen[i] = 1;
+    while (stack.length) {
+      const j = stack.pop();
+      cells.push(j);
+      const r = Math.floor(j / GK_N), c = j % GK_N;
+      if (r === 0) edges.add('T');
+      if (r === GK_N - 1) edges.add('B');
+      if (c === 0) edges.add('L');
+      if (c === GK_N - 1) edges.add('R');
+      for (const k of gkNbrs(j)) {
+        if (b[k] === GK_EMPTY) { if (!seen[k]) { seen[k] = 1; stack.push(k); } }
+        else if (b[k] === GK_BLUE || b[k] === GK_ORANGE) border.add(b[k]);
+      }
+    }
+    const o = (border.size === 1 && edges.size < 4) ? [...border][0] : 0;
+    for (const j of cells) owner[j] = o;
+  }
+  return owner;
+}
+
+function gkScore(owner) {
+  const s = { 1: 0, 2: 0 };
+  for (const o of owner) if (o) s[o]++;
+  return s;
+}
+
+// 착수 판정: {ok, reason} 또는 {ok:true, kind:'normal'|'capture'|'suicide', captured:[]}
+function gkEvaluate(b, i, p, stones) {
+  if (b[i] === GK_NEUTRAL) return { ok: false, reason: '중립 성이 있는 자리입니다.' };
+  if (b[i] !== GK_EMPTY) return { ok: false, reason: '이미 성이 있는 자리입니다.' };
+  const opp = 3 - p;
+  if (gkTerritory(b)[i] === opp) return { ok: false, reason: GK_NAME[opp] + '의 완성된 영토에는 성을 놓을 수 없습니다.' };
+  if (stones[p] <= 0) return { ok: false, reason: '남은 성이 없습니다. 패스하세요.' };
+  const nb = b.slice(); nb[i] = p;
+  const captured = new Set();
+  for (const k of gkNbrs(i)) {
+    if (nb[k] === opp && !captured.has(k)) {
+      const g = gkGroup(nb, k);
+      if (g.libs.size === 0) g.stones.forEach(s => captured.add(s));
+    }
+  }
+  // 양쪽 모두 파괴되는 상황이면 놓은 쪽이 우선 → 상대 파괴를 먼저 확인
+  if (captured.size) return { ok: true, kind: 'capture', captured: [...captured] };
+  const own = gkGroup(nb, i);
+  if (own.libs.size === 0) return { ok: true, kind: 'suicide', captured: own.stones };
+  return { ok: true, kind: 'normal', captured: [] };
+}
+
+// attacker가 다음 한 수로 파괴할 수 있는 상대 성 목록 (= '공격' 상황)
+function gkThreats(b, attacker, stones) {
+  const res = new Set(), seen = new Set(), defender = 3 - attacker;
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== defender || seen.has(i)) continue;
+    const g = gkGroup(b, i);
+    g.stones.forEach(s => seen.add(s));
+    if (g.libs.size === 1) {
+      const L = [...g.libs][0];
+      const ev = gkEvaluate(b, L, attacker, stones);
+      if (ev.ok && ev.kind === 'capture') ev.captured.forEach(s => res.add(s));
+    }
+  }
+  return res;
+}
+
+
+var AI_ANCHOR = true;
+/* =========================================================
+   GREAT KINGDOM — AI
+   ========================================================= */
+// 다음 한 수로 attacker가 상대 성을 파괴할 수 있는가
+// (숨구멍이 1개뿐인 무리의 그 숨구멍이 상대(방어자) 영토가 아니면 파괴 가능)
+function aiCanCapture(b, attacker, owner) {
+  const defender = 3 - attacker;
+  owner = owner || gkTerritory(b);
+  const seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== defender || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const s of g.stones) seen[s] = 1;
+    if (g.libs.size === 1) {
+      const L = g.libs.values().next().value;
+      if (owner[L] !== defender) return true;
+    }
+  }
+  return false;
+}
+
+function aiApply(b, i, p) {
+  const nb = b.slice(), opp = 3 - p;
+  nb[i] = p;
+  for (const k of gkNbrs(i)) if (nb[k] === opp && gkGroup(nb, k).libs.size === 0) return { nb, kind: 'capture' };
+  if (gkGroup(nb, i).libs.size === 0) return { nb, kind: 'suicide' };
+  return { nb, kind: 'normal' };
+}
+
+// 둘 만한 후보: 빈칸 중 상대 영토·내 영토가 아닌 곳
+function aiCandidates(b, p) {
+  const owner = gkTerritory(b), res = [];
+  for (let i = 0; i < 81; i++) if (b[i] === GK_EMPTY && owner[i] === 0) res.push(i);
+  return res;
+}
+
+// 형세 평가 (me 입장, 클수록 유리)
+function aiEval(b, me) {
+  const owner = gkTerritory(b), opp = 3 - me, infl = new Float32Array(81);
+  for (let i = 0; i < 81; i++) {
+    const v = b[i];
+    if (v !== GK_BLUE && v !== GK_ORANGE) continue;
+    const sg = v === me ? 1 : -1, r = (i / 9) | 0, c = i % 9;
+    for (let dr = -3; dr <= 3; dr++) {
+      const rr = r + dr; if (rr < 0 || rr > 8) continue;
+      const rem = 3 - Math.abs(dr);
+      for (let dc = -rem; dc <= rem; dc++) {
+        const cc = c + dc; if (cc < 0 || cc > 8) continue;
+        infl[rr * 9 + cc] += sg * (4 - Math.abs(dr) - Math.abs(dc));
+      }
+    }
+  }
+  let s = 0;
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== GK_EMPTY) continue;
+    if (owner[i] === me) s += 1;
+    else if (owner[i] === opp) s -= 1;
+    else s += 0.45 * Math.max(-1, Math.min(1, infl[i] / 6));
+  }
+  const seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    const v = b[i];
+    if ((v !== GK_BLUE && v !== GK_ORANGE) || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const st of g.stones) seen[st] = 1;
+    const sg = v === me ? 1 : -1;
+    if (AI_ANCHOR) {
+      // 내 영토에 닿은 무리 = 절대 파괴되지 않는 기지
+      let immortal = false;
+      for (const L of g.libs) if (owner[L] === v) { immortal = true; break; }
+      if (immortal) { s += sg * (1.2 + 0.25 * g.stones.length); continue; }
+      const n = g.libs.size;
+      if (n === 1) s += v === me ? -2.5 : 1.2;
+      else if (n === 2) s += v === me ? -0.8 : 0.5;
+      else if (n === 3) s += sg * -0.15;
+    } else {
+      const n = g.libs.size;
+      if (n === 1) s += v === me ? -2 : 1;
+      else if (n === 2) s += v === me ? -0.3 : 0.15;
+    }
+  }
+  return s;
+}
+
+function aiPick(list) {
+  let best = null;
+  for (const m of list) if (!best || m.v > best.v) best = m;
+  return best;
+}
+
+function aiEasy(b, me) {
+  const opp = 3 - me, out = [];
+  for (const i of aiCandidates(b, me)) {
+    const r = aiApply(b, i, me);
+    if (r.kind === 'suicide') continue;
+    out.push({ i, r });
+  }
+  if (!out.length) return null;
+  const caps = out.filter(m => m.r.kind === 'capture');
+  if (caps.length && Math.random() < 0.6) return caps[0];
+  let pool = out;
+  if (Math.random() < 0.5) { const safe = out.filter(m => !aiCanCapture(m.r.nb, opp)); if (safe.length) pool = safe; }
+  pool.forEach(m => { m.v = aiEval(m.r.nb, me) + Math.random() * 4; });
+  return aiPick(pool);
+}
+
+function aiNormal(b, me) {
+  const opp = 3 - me, out = [];
+  for (const i of aiCandidates(b, me)) {
+    const r = aiApply(b, i, me);
+    if (r.kind === 'capture') return { i, v: 9999 };
+    if (r.kind === 'suicide') continue;
+    const v = aiCanCapture(r.nb, opp) ? -1000 : aiEval(r.nb, me) + Math.random() * 0.5;
+    out.push({ i, v });
+  }
+  return aiPick(out);
+}
+
+function aiHard(b, me) {
+  const opp = 3 - me, first = [];
+  for (const i of aiCandidates(b, me)) {
+    const r = aiApply(b, i, me);
+    if (r.kind === 'capture') return { i, v: 9999 };
+    if (r.kind === 'suicide') continue;
+    const v = aiCanCapture(r.nb, opp) ? -1000 : aiEval(r.nb, me) + Math.random() * 0.05;
+    first.push({ i, v, nb: r.nb });
+  }
+  if (!first.length) return null;
+  first.sort((a, c) => c.v - a.v);
+  const top = first.filter(m => m.v > -500).slice(0, 12);
+  if (!top.length) return first[0];
+  for (const t of top) {
+    let worst = t.v; // 상대가 패스하는 경우
+    const replies = [];
+    for (const o of aiCandidates(t.nb, opp)) {
+      const rr = aiApply(t.nb, o, opp);
+      if (rr.kind === 'capture') { worst = -1000; break; }
+      if (rr.kind === 'suicide') continue;
+      replies.push({ nb: rr.nb, v: aiEval(rr.nb, me) });
+    }
+    if (worst > -1000) {
+      replies.sort((a, c) => a.v - c.v);
+      for (const rp of replies.slice(0, 6)) {
+        const val = aiCanCapture(rp.nb, me) ? 500 : rp.v;
+        if (val < worst) worst = val;
+      }
+    }
+    t.score = worst;
+  }
+  let best = top[0];
+  for (const t of top) if (t.score > best.score) best = t;
+  return best;
+}
+
+// 쉬움: 한 수 앞을 보지만 실수가 섞임
+function aiEasy2(b, me) {
+  const opp = 3 - me, out = [];
+  for (const i of aiCandidates(b, me)) {
+    const r = aiApply(b, i, me);
+    if (r.kind === 'capture') { if (Math.random() < 0.85) return { i, v: 9999 }; continue; }
+    if (r.kind === 'suicide') continue;
+    const careless = Math.random() < 0.3;
+    const v = (!careless && aiCanCapture(r.nb, opp)) ? -1000 : aiEval(r.nb, me) + Math.random() * 2;
+    out.push({ i, v });
+  }
+  return aiPick(out);
+}
+
+// 반환: 둘 칸 번호, 패스면 -1
+function aiChooseMove(S, me, level) {
+  const b = S.board;
+  if (S.stones[me] <= 0) return -1;
+  if (S.passes === 1) {
+    const sc = gkScore(gkTerritory(b));
+    if (((sc[1] - sc[2] >= 3) ? GK_BLUE : GK_ORANGE) === me) return -1; // 지금 끝내면 이김 → 패스
+  }
+  let m;
+  if (level === 'hard' || level === 'master') m = srBestMove(b, me, AI_LEVELS[level]);
+  else m = (level === 'easy' ? aiEasy2 : aiHard)(b, me);
+  if (!m) return -1;
+  if (S.moves.length > 20 && (m.v == null || m.v > -500)) {
+    const after = aiApply(b, m.i, me);
+    if (after.kind === 'normal' && aiEval(after.nb, me) < aiEval(b, me) - 0.6 && !srThreats(b, me, gkTerritory(b)).size) return -1; // 둘수록 손해면 패스
+  }
+  return m.i;
+}
+
+/* ---------- 수읽기 AI (어려움 · 고수) ---------- */
+const AI_WIN = 100000;
+
+// p 차례에서 p가 바로 파괴할 수 있는가
+function srCanWin(b, p, owner) {
+  const opp = 3 - p, seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== opp || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const s of g.stones) seen[s] = 1;
+    if (g.libs.size === 1) {
+      const L = g.libs.values().next().value;
+      if (owner[L] !== opp) return L;
+    }
+  }
+  return -1;
+}
+
+// 상대가 p의 성을 파괴하려고 노리는 칸들
+function srThreats(b, p, owner) {
+  const res = new Set(), seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== p || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const s of g.stones) seen[s] = 1;
+    if (g.libs.size === 1) {
+      const L = g.libs.values().next().value;
+      if (owner[L] !== p) res.add(L);
+    }
+  }
+  return res;
+}
+
+// p가 두면 상대 무리를 단수(숨구멍 1개)로 만드는 칸
+function srAtariMoves(b, p, owner) {
+  const opp = 3 - p, res = new Set(), seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== opp || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const s of g.stones) seen[s] = 1;
+    if (g.libs.size === 2) for (const L of g.libs) if (owner[L] === 0) res.add(L);
+  }
+  return [...res];
+}
+
+function srChildren(b, p, moves, ctx) {
+  const out = [];
+  for (const i of moves) {
+    const r = aiApply(b, i, p);
+    if (r.kind === 'suicide') continue;
+    out.push({ i, nb: r.nb, kind: r.kind });
+  }
+  return out;
+}
+
+function srOrder(kids, p) {
+  for (const k of kids) k.v = aiEval(k.nb, p);
+  kids.sort((a, c) => c.v - a.v);
+  return kids;
+}
+
+function srSearch(b, p, depth, alpha, beta, ply, ctx) {
+  if ((++ctx.nodes & 255) === 0 && Date.now() > ctx.deadline) throw ctx;
+  const owner = gkTerritory(b);
+  if (srCanWin(b, p, owner) >= 0) return AI_WIN - ply;
+  const threats = srThreats(b, p, owner);
+  let moves, standPat = null;
+
+  if (depth <= 0) {
+    if (!threats.size) {
+      standPat = aiEval(b, p);
+      if (depth <= -ctx.qdepth || standPat >= beta) return standPat;
+      if (standPat > alpha) alpha = standPat;
+      moves = srAtariMoves(b, p, owner).slice(0, 5);
+    } else {
+      if (depth <= -ctx.qdepth) return aiEval(b, p) - 3;
+      moves = [...threats];
+    }
+  } else {
+    moves = threats.size ? [...threats] : aiCandidates(b, p);
+  }
+
+  let kids = srChildren(b, p, moves, ctx);
+  if (!kids.length) {
+    if (threats.size) return -(AI_WIN - ply - 1);
+    return standPat != null ? standPat : aiEval(b, p);
+  }
+  if (depth >= 1 && kids.length > 1) {
+    srOrder(kids, p);
+    const w = ply === 0 ? ctx.rootWidth : ctx.width;
+    if (!threats.size && kids.length > w) {
+      // 숨구멍 2개짜리 무리의 숨구멍(방어·공격 급소)은 항상 읽는다
+      const urgent = new Set(), seen = new Uint8Array(81);
+      for (let i = 0; i < 81; i++) {
+        const v = b[i];
+        if ((v !== GK_BLUE && v !== GK_ORANGE) || seen[i]) continue;
+        const g = gkGroup(b, i);
+        for (const st of g.stones) seen[st] = 1;
+        if (g.libs.size === 2) for (const L of g.libs) urgent.add(L);
+      }
+      kids = kids.slice(0, w).concat(kids.slice(w).filter(k => urgent.has(k.i)));
+    }
+  }
+  let best = standPat != null ? standPat : -Infinity;
+  for (const k of kids) {
+    const v = -srSearch(k.nb, 3 - p, depth - 1, -beta, -alpha, ply + 1, ctx);
+    if (v > best) { best = v; if (ply === 0) ctx.bestMove = k.i; }
+    if (v > alpha) alpha = v;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+// 반복 심화: 시간 안에서 최대한 깊이 읽기
+function srBestMove(b, p, opt) {
+  const owner = gkTerritory(b);
+  const win = srCanWin(b, p, owner);
+  if (win >= 0) return { i: win, v: AI_WIN };
+  let result = null;
+  const ctx = {
+    deadline: Date.now() + opt.timeMs, nodes: 0, qdepth: opt.qdepth,
+    width: opt.width, rootWidth: opt.rootWidth, bestMove: -1
+  };
+  for (let d = 1; d <= opt.maxDepth; d++) {
+    ctx.bestMove = -1;
+    try {
+      const v = srSearch(b, p, d, -Infinity, Infinity, 0, ctx);
+      if (ctx.bestMove >= 0) result = { i: ctx.bestMove, v, depth: d };
+      if (v >= AI_WIN - 50 || v <= -(AI_WIN - 50)) break; // 승패가 보이면 그만
+    } catch (e) {
+      if (e !== ctx) throw e;
+      break;
+    }
+  }
+  return result;
+}
+
+const AI_LEVELS = {
+  hard:   { maxDepth: 4, width: 8,  rootWidth: 14, qdepth: 6, timeMs: 1200 },
+  master: { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 6, timeMs: 2500 }
+};
+
+/* =========================================================
+   GREAT KINGDOM — 연습모드 (문제 판정 + 스테이지)
+   ========================================================= */
+// p가 n수 안에 상대 성을 반드시 파괴할 수 있는가 (단수로 몰아붙이는 수만 읽음)
+function pzWinsIn(b, p, n) {
+  const owner = gkTerritory(b);
+  if (srCanWin(b, p, owner) >= 0) return true;
+  if (n <= 1) return false;
+  for (const m of srAtariMoves(b, p, owner)) {
+    const r = aiApply(b, m, p);
+    if (r.kind !== 'normal') continue;
+    if (!pzDefends(r.nb, 3 - p, p, n - 1)) return true;
+  }
+  return false;
+}
+// 수비 d 차례: 공격 p의 n수 파괴를 막을 수 있는가
+function pzDefends(b, d, p, n) {
+  const owner = gkTerritory(b);
+  if (srCanWin(b, d, owner) >= 0) return true;
+  const th = srThreats(b, d, owner);
+  if (!th.size) {
+    if (!pzWinsIn(b, p, n)) return true;           // 그냥 두어도(패스) 안전
+    const seen = new Uint8Array(81), tries = new Set();
+    for (let i = 0; i < 81; i++) {                  // 숨구멍 2개 이하인 무리를 이어 나가기
+      if (b[i] !== d || seen[i]) continue;
+      const g = gkGroup(b, i);
+      for (const s of g.stones) seen[s] = 1;
+      if (g.libs.size <= 2) for (const L of g.libs) if (owner[L] !== p) tries.add(L);
+    }
+    for (const L of tries) {
+      const r = aiApply(b, L, d);
+      if (r.kind === 'capture') return true;
+      if (r.kind === 'normal' && !pzWinsIn(r.nb, p, n)) return true;
+    }
+    return false;
+  }
+  for (const L of th) {
+    const r = aiApply(b, L, d);
+    if (r.kind === 'capture') return true;
+    if (r.kind === 'suicide') continue;
+    if (!pzWinsIn(r.nb, p, n)) return true;
+  }
+  return false;
+}
+// 수비 AI의 응수: 가장 오래 버티는 수
+function pzDefenderReply(b, d, p, n) {
+  const owner = gkTerritory(b);
+  const win = srCanWin(b, d, owner);
+  if (win >= 0) return win;
+  const th = srThreats(b, d, owner);
+  if (th.size) {
+    let fallback = -1;
+    for (const L of th) {
+      const r = aiApply(b, L, d);
+      if (r.kind === 'capture') return L;
+      if (r.kind === 'suicide') continue;
+      if (fallback < 0) fallback = L;
+      if (!pzWinsIn(r.nb, p, n)) return L;
+    }
+    if (fallback >= 0) return fallback;
+  }
+  const m = srBestMove(b, d, { maxDepth: 3, width: 8, rootWidth: 12, qdepth: 4, timeMs: 600 });
+  return m ? m.i : -1;
+}
+
+function pzBoard(rows) {
+  const b = [];
+  rows.forEach(r => { for (const ch of r) b.push(ch === 'B' ? 1 : ch === 'O' ? 2 : ch === '+' ? 3 : 0); });
+  b[GK_CENTER] = GK_NEUTRAL;
+  return b;
+}
+function pzIdx(s) { return (+s.slice(1) - 1) * 9 + GK_COLS.indexOf(s[0]); }
+
+// 한 수 판정 문제: true = 정답
+function pzCheckOne(stage, b, i) {
+  const P = 1, O = 2, g = stage.goal;
+  const r = aiApply(b, i, P);
+  if (r.kind === 'suicide') return { ok: false, why: '내 성이 갇혀 파괴되는 자리예요.' };
+  if (g.type === 'capture') return r.kind === 'capture' ? { ok: true } : { ok: false };
+  if (r.kind === 'capture') return { ok: true };
+  const nb = r.nb;
+  if (srCanWin(nb, O, gkTerritory(nb)) >= 0) return { ok: false, why: '이렇게 두면 상대가 바로 내 성을 파괴해요.' };
+  if (g.type === 'save') {
+    return pzWinsIn(nb, O, g.depth) ? { ok: false, why: '아직 숨구멍이 부족해서 상대가 계속 몰아붙여 파괴할 수 있어요.' } : { ok: true };
+  }
+  if (g.type === 'deny' || g.type === 'diff') {
+    let worst = Infinity, worstMove = -1;
+    const replies = [-1];
+    for (const j of aiCandidates(nb, O)) replies.push(j);
+    for (const j of replies) {
+      let nb2 = nb;
+      if (j >= 0) { const r2 = aiApply(nb, j, O); if (r2.kind !== 'normal') continue; nb2 = r2.nb; }
+      const sc = gkScore(gkTerritory(nb2));
+      const val = g.type === 'deny' ? -sc[O] : sc[P] - sc[O];
+      if (val < worst) { worst = val; worstMove = j; }
+    }
+    const ok = g.type === 'deny' ? -worst < g.target : worst >= g.target;
+    return ok ? { ok: true } : { ok: false, reply: worstMove };
+  }
+  return { ok: false };
+}
+
+const PZ_STAGES = [
+  // ── 1장. 영토 만들기 ──
+  { ch: 1, title: '영토란 무엇일까?', goal: { type: 'territory', target: 1, moves: 1 }, hint: 'D5',
+    lesson: '내 성이 <b>상하좌우</b>를 빈틈없이 둘러싼 빈칸이 <b>영토</b>예요. 대각선은 상관없어요.',
+    task: '성 1개를 놓아 <b>영토 1칸</b>을 만드세요.',
+    tip: '네 방향을 모두 막으면 영토! 게임이 끝났을 때 영토가 많은 쪽이 이겨요.',
+    rows: ['.........', '.........', '...B.....', '..B.B....', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 1, title: '가장자리는 공짜 벽', goal: { type: 'territory', target: 3, moves: 1 }, hint: 'F2',
+    lesson: '게임판의 <b>가장자리</b>는 벽처럼 막힌 곳으로 쳐요. 가장자리를 이용하면 성을 덜 쓰고도 영토를 만들 수 있어요.',
+    task: '성 1개로 위쪽 가장자리에 <b>영토 3칸</b>을 만드세요.',
+    tip: '가장자리 덕분에 위쪽은 막을 필요가 없었어요. 성 5개로 영토 3칸!' ,
+    rows: ['..B...B..', '...BB....', '.........', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 1, title: '모서리는 보물창고', goal: { type: 'territory', target: 4, moves: 1 }, hint: 'B3',
+    lesson: '<b>모서리</b>는 가장자리 두 변이 만나는 곳이라 영토 만들기가 가장 쉬워요.',
+    task: '성 1개로 왼쪽 위 모서리에 <b>영토 4칸</b>을 만드세요.',
+    tip: '성 4개로 영토 4칸! 모서리는 가장 효율이 좋은 곳이에요. 그래서 처음에는 모서리와 가장자리를 노리는 게 좋아요.',
+    rows: ['..B......', '..B......', 'B........', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 1, title: '중립 성도 벽이다', goal: { type: 'territory', target: 2, moves: 1 }, hint: 'F5',
+    lesson: '한가운데 <b>중립 성</b>은 누구의 것도 아니지만, 가장자리처럼 <b>막힌 곳</b>으로 쳐요.',
+    task: '중립 성을 이용해 <b>영토 2칸</b>을 만드세요.',
+    tip: '중립 성 옆은 한 면이 이미 막혀 있어요. 가운데 싸움에서 유용해요.',
+    rows: ['.........', '.........', '....BB...', '...B..B..', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 1, title: '두 수로 큰 영토', goal: { type: 'territory', target: 6, moves: 2 }, hint: 'D2',
+    lesson: '큰 영토는 여러 수에 걸쳐 만들어요. 어디가 비어 있는지 잘 살펴보세요.',
+    task: '성 2개를 놓아 <b>영토 6칸</b>을 만드세요.',
+    tip: '벽의 빈틈을 찾아 막으면 큰 영토가 완성돼요. 실전에서는 상대가 빈틈으로 들어오기 전에 막아야 해요!',
+    rows: ['...B.....', '.........', 'B.B......', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+
+  // ── 2장. 공성 ──
+  { ch: 2, title: '포위하면 파괴!', goal: { type: 'capture', moves: 1 }, hint: 'E4',
+    lesson: '상대 성의 <b>상하좌우를 빈틈없이</b> 둘러싸면 그 성을 파괴하고 <b>즉시 승리</b>해요.',
+    task: '주황 성을 파괴하세요.',
+    tip: '성 옆의 빈칸을 <b>숨구멍</b>이라고 생각하세요. 숨구멍이 모두 막히면 파괴돼요.',
+    rows: ['.........', '....B....', '...BOB...', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 2, title: '가장자리 공성', goal: { type: 'capture', moves: 1 }, hint: 'A6',
+    lesson: '가장자리에 붙은 성은 숨구멍이 적어요. 그래서 파괴하기 쉬워요.',
+    task: '가장자리의 주황 성을 파괴하세요.',
+    tip: '가장자리 성은 숨구멍이 3개, 모서리 성은 2개뿐! 내 성을 가장자리에 둘 때는 조심하세요.',
+    rows: ['.........', '.........', '.........', 'B........', 'OB..+....', '.........', '.........', '.........', '.........'] },
+  { ch: 2, title: '무리째로 파괴', goal: { type: 'capture', moves: 1 }, hint: 'D4',
+    lesson: '상하좌우로 붙어 있는 성들은 <b>한 무리</b>예요. 무리 전체의 숨구멍을 모두 막으면 한꺼번에 파괴돼요.',
+    task: '주황 성 무리를 통째로 파괴하세요.',
+    tip: '무리의 숨구멍을 하나씩 세어 보는 습관을 들이세요. 마지막 하나를 찾으면 승리!',
+    rows: ['.........', '..BB.....', '.BOOB....', '.BO......', '..B.+....', '.........', '.........', '.........', '.........'] },
+  { ch: 2, title: '중립 성을 이용한 공성', goal: { type: 'capture', moves: 1 }, hint: 'D6',
+    lesson: '중립 성은 공성할 때도 벽 역할을 해요. 중립 성 옆의 성은 숨구멍이 하나 적어요.',
+    task: '중립 성 옆의 주황 성을 파괴하세요.',
+    tip: '중립 성 옆에 내 성을 둘 때도 숨구멍이 적다는 걸 기억하세요.',
+    rows: ['.........', '.........', '.........', '...B.....', '..BO+....', '.........', '.........', '.........', '.........'] },
+  { ch: 2, title: '먼저 두는 쪽이 이긴다', goal: { type: 'capture', moves: 1 }, hint: 'I1',
+    lesson: '성을 놓았을 때 <b>양쪽 성이 모두 파괴되는 상황</b>이면, <b>놓은 쪽의 성은 그대로</b> 두고 상대 성만 파괴해요.',
+    task: '내 파랑 성도 위험해요! 하지만 지금은 내 차례예요. 주황 성을 파괴하세요.',
+    tip: '서로 노리고 있을 때는 먼저 두는 사람이 이겨요. 그래서 상대 차례에 넘겨주면 안 돼요!',
+    rows: ['......BO.', '......BOB', '.......BO', '........O', '....+....', '.........', '.........', '.........', '.........'] },
+
+  // ── 3장. 방어 ──
+  { ch: 3, title: '공격을 막아라', goal: { type: 'save', depth: 3 }, hint: 'D4',
+    lesson: '내 성의 숨구멍이 <b>1개</b>만 남으면 상대가 다음 수에 파괴할 수 있어요. 이것을 <b>공격</b> 상황이라고 해요.',
+    task: 'D3의 파랑 성이 공격받고 있어요. 성을 지키세요.',
+    tip: '마지막 숨구멍 쪽으로 성을 이어 놓으면 숨구멍이 늘어나요. 이것을 <b>달아나기</b>라고 해요.',
+    rows: ['.........', '...O.....', '..OBO....', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 3, title: '막기보다 먼저 파괴!', goal: { type: 'capture', moves: 1 }, hint: 'E4',
+    lesson: '내 성이 공격받을 때, 무작정 막기 전에 <b>내가 먼저 파괴할 수 있는 상대 성</b>이 있는지 살펴보세요.',
+    task: '파랑 성이 공격받고 있지만, 더 좋은 수가 있어요. 한 수로 이기세요.',
+    tip: '공격받으면 ① 먼저 파괴할 수 있는지 ② 아니면 막기! 이 순서로 생각하세요.',
+    rows: ['.........', '...OB....', '..OBOB...', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 3, title: '넓은 쪽으로 달아나기', goal: { type: 'save', depth: 4 }, hint: 'C2',
+    lesson: '달아날 때는 <b>방향</b>이 중요해요. 가장자리나 상대 성 쪽으로 가면 숨구멍이 금방 다시 막혀요.',
+    task: 'B2의 파랑 성(숨구멍 2개)이 위험해요. 상대가 계속 몰아붙여도 살 수 있게 두세요.',
+    tip: '숨구멍이 많은 넓은 곳으로 나가야 살 수 있어요. 구석으로 들어가면 결국 갇혀요.',
+    rows: ['..O......', 'OB.......', '.O.......', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+
+  // ── 4장. 전술 ──
+  { ch: 4, title: '양쪽 공격', goal: { type: 'capture', moves: 2 }, hint: 'D3',
+    lesson: '한 수로 <b>두 무리를 동시에 공격</b>하면, 상대는 하나만 막을 수 있어요. 나머지 하나는 파괴!',
+    task: '2수 안에 주황 성을 파괴하세요. (주황도 막으려고 둡니다)',
+    tip: '두 곳을 동시에 노리는 수를 찾으면 거의 이긴 거예요. 이것을 <b>양공격</b>이라고 해요.',
+    rows: ['.........', '..B.B....', '.BO.OB...', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 4, title: '구석으로 몰아라', goal: { type: 'capture', moves: 3 }, hint: 'A4',
+    lesson: '상대 성을 공격할 때는 <b>구석(모서리) 쪽으로</b> 몰아야 해요. 넓은 쪽으로 몰면 상대가 도망가 버려요.',
+    task: '3수 안에 가장자리의 주황 성을 파괴하세요.',
+    tip: '구석 쪽으로 몰면 숨구멍이 점점 줄어요. 반대쪽으로 몰았다면 끝까지 쫓아가야 했을 거예요.',
+    rows: ['.........', '.........', 'OB.......', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 4, title: '도망갈 길을 막아라', goal: { type: 'capture', moves: 3 }, hint: 'C4',
+    lesson: '공격할 때는 상대가 <b>도망갈 넓은 쪽</b>을 막는 방향으로 공격해야 해요.',
+    task: '3수 안에 주황 성을 파괴하세요.',
+    tip: '어느 쪽에서 공격할지 고를 때, 상대가 이어 나갈 곳의 숨구멍을 먼저 세어 보세요.',
+    rows: ['...B.....', '..B......', '.BO.B....', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+
+  // ── 5장. 영토 전략 ──
+  { ch: 5, title: '상대 영토 깨기', goal: { type: 'deny', target: 4 }, hint: 'B3',
+    lesson: '상대가 영토를 완성하기 직전이라면, <b>빈틈에 먼저 성을 놓아</b> 영토를 막을 수 있어요.',
+    task: '주황이 모서리에 영토 4칸을 만들려고 해요. 막으세요!',
+    tip: '상대 영토가 완성되면 그 안에는 성을 놓을 수 없어요. 완성되기 전에 막는 게 중요해요.',
+    rows: ['..O......', '..O......', 'O........', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 5, title: '어디가 더 클까?', goal: { type: 'diff', target: 0 }, hint: 'H2',
+    lesson: '내 영토를 완성하는 수와 상대 영토를 깨는 수 중 <b>더 큰 쪽</b>을 먼저 두세요.',
+    task: '파랑은 왼쪽 위 2칸, 주황은 오른쪽 위 6칸을 노리고 있어요. 한 수씩 둔 뒤 <b>파랑 영토가 주황보다 적지 않게</b> 하세요.',
+    tip: '내 영토 2칸을 완성하면 주황이 6칸을 완성해요. 상대의 큰 곳을 먼저 깨는 게 이득! 그리고 입구(H3)보다 <b>안쪽</b>에 들어가야 확실히 깨져요.',
+    rows: ['.....O...', 'BB...O...', '......O.O', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+];
+
+// p가 n수 안에 파괴하는 첫 수 (없으면 -1)
+function pzFindWin(b, p, n) {
+  const owner = gkTerritory(b);
+  const w = srCanWin(b, p, owner);
+  if (w >= 0) return w;
+  if (n <= 1) return -1;
+  for (const m of srAtariMoves(b, p, owner)) {
+    const r = aiApply(b, m, p);
+    if (r.kind !== 'normal') continue;
+    if (!pzDefends(r.nb, 3 - p, p, n - 1)) return m;
+  }
+  return -1;
+}
+
+/* =========================================================
+   GREAT KINGDOM — 화면
+   ========================================================= */
+function mountGreatKingdom(root) {
+  root.innerHTML = '';
+  const SERIF = "'Noto Serif KR','Nanum Myeongjo','AppleMyungjo','Batang',Georgia,serif";
+  const SANS = "'Pretendard','Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif";
+
+  let S = gkNew(), hist = [], showTerr = true, hover = -1, pendingSuicide = -1, note = '';
+  let cfg = { mode: 'ai', level: 'normal', human: 1 }, aiTimer = null, thinking = false;
+  const LEVEL_NAME = { easy: '쉬움', normal: '보통', hard: '어려움', master: '고수' };
+  const CH_NAME = { 1: '영토 만들기', 2: '공성', 3: '방어', 4: '전술', 5: '영토 전략' };
+  let view = 'game';
+  let pz = null;
+  let cleared = [];
+  try { cleared = JSON.parse(localStorage.getItem('gkPracticeCleared') || '[]'); } catch (e) { cleared = []; }
+  const saveCleared = () => { try { localStorage.setItem('gkPracticeCleared', JSON.stringify(cleared)); } catch (e) {} };
+  const isUnlocked = k => k === 0 || !!cleared[k - 1] || !!cleared[k];
+  const isAI = p => cfg.mode === 'ai' && p !== cfg.human;
+  const aiTurn = () => !S.over && isAI(S.turn);
+  const who = p => GK_NAME[p] + (cfg.mode === 'ai' ? (isAI(p) ? '(AI)' : '(나)') : '');
+
+  const h = (tag, style, html) => {
+    const e = document.createElement(tag);
+    if (style) Object.assign(e.style, style);
+    if (html != null) e.innerHTML = html;
+    return e;
+  };
+  const clone = o => JSON.parse(JSON.stringify(o));
+  const nameI = p => GK_NAME[p] + '이';          // 파랑이 / 주황이
+  const nameColor = p => p === 1 ? '#8fa8ff' : '#ffa865';
+
+  function piece(color, opacity) {
+    const P = {
+      1: { tile: '#2b54d6', edge: '#9db3ff', hi: '#6a8dff', glyph: '#eef2ff', door: '#1a3194' },
+      2: { tile: '#d8641c', edge: '#ffc48f', hi: '#f39250', glyph: '#fff4e8', door: '#8f3a08' },
+      3: { tile: '#b9bec6', edge: '#ffffff', hi: '#e4e7eb', glyph: '#5d636c', door: '#9aa0a8' }
+    }[color];
+    return '<svg viewBox="0 0 100 100" width="100%" height="100%" style="display:block;opacity:' + (opacity == null ? 1 : opacity) + '">' +
+      '<rect x="5" y="5" width="90" height="90" rx="14" fill="' + P.tile + '" stroke="' + P.edge + '" stroke-width="3"/>' +
+      '<rect x="11" y="11" width="78" height="36" rx="10" fill="' + P.hi + '" opacity="0.45"/>' +
+      '<path d="M26 80 V44 H33 V51 H40 V44 H47 V51 H53 V44 H60 V51 H67 V44 H74 V80 Z" fill="' + P.glyph + '"/>' +
+      '<path d="M43 80 V68 A7 7 0 0 1 57 68 V80 Z" fill="' + P.door + '"/>' +
+      '<line x1="50" y1="51" x2="50" y2="19" stroke="' + P.glyph + '" stroke-width="3"/>' +
+      '<path d="M51.5 19 L67 24.5 L51.5 30 Z" fill="' + P.glyph + '"/></svg>';
+  }
+
+  const styleTag = h('style', null,
+    '@keyframes gkPulse{0%,100%{box-shadow:0 0 0 2px #e0473a,0 0 8px 2px rgba(224,71,58,.6)}50%{box-shadow:0 0 0 3px #ff9182,0 0 18px 6px rgba(224,71,58,.95)}}' +
+    '@keyframes gkBlink{0%,100%{opacity:1}50%{opacity:.35}}' +
+    '@keyframes gkHint{0%,100%{box-shadow:0 0 0 2px #d4af37,0 0 8px 2px rgba(243,217,139,.5)}50%{box-shadow:0 0 0 4px #f3d98b,0 0 22px 8px rgba(243,217,139,.9)}}' +
+    '.gk-tab{transition:all .15s}.gk-tab:hover{color:#f3d98b !important}' +
+    '.gk-stage{transition:all .15s}.gk-stage:hover{border-color:#f3d98b !important;filter:brightness(1.15)}' +
+    '@keyframes gkFade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}' +
+    '.gk-cell:hover{filter:brightness(1.18)}' +
+    '.gk-btn{transition:background .15s,border-color .15s}' +
+    '.gk-btn:hover{background:#2b2418 !important;border-color:#f3d98b !important}' +
+    '.gk-btn:active{transform:translateY(1px)}' +
+    '.gk-btn:disabled{opacity:.35;cursor:default}');
+
+  const wrap = h('div', {
+    background: 'radial-gradient(ellipse at top,#221d13 0%,#0b0a08 65%)', minHeight: '100vh',
+    color: '#efe6cf', fontFamily: SANS, padding: '18px 14px 30px', boxSizing: 'border-box', userSelect: 'none'
+  });
+  wrap.appendChild(styleTag);
+
+  wrap.appendChild(h('div', { textAlign: 'center', marginBottom: '16px' },
+    '<div style="font-family:' + SERIF + ';font-size:34px;letter-spacing:7px;color:#d4af37;text-shadow:0 2px 14px rgba(212,175,55,.35)">GREAT KINGDOM</div>' +
+    '<div style="font-family:' + SERIF + ';color:#a39876;letter-spacing:12px;font-size:13px;margin-top:3px">그레이트 킹덤</div>' +
+    '<div style="width:280px;max-width:80%;height:1px;margin:10px auto 0;background:linear-gradient(90deg,transparent,#d4af37,transparent)"></div>'));
+
+  const tabs = h('div', { display: 'flex', justifyContent: 'center', gap: '6px', marginBottom: '16px' });
+  const mkTab = (label, fn) => {
+    const t = h('button', { background: 'transparent', border: '1px solid #3a3122', color: '#a39876', padding: '8px 20px',
+      borderRadius: '20px', fontSize: '15px', fontFamily: SANS, cursor: 'pointer' }, label);
+    t.className = 'gk-tab'; t.addEventListener('click', fn); tabs.appendChild(t); return t;
+  };
+  const tabGame = mkTab('⚔️ 대전', () => { if (view !== 'game') { view = 'game'; closeModal(); render(); maybeAI(); } });
+  const tabPz = mkTab('📘 연습모드', () => { if (view !== 'practice') { stopAI(); openStageList(); } else openStageList(); });
+  wrap.appendChild(tabs);
+
+  const main = h('div', { display: 'flex', flexWrap: 'wrap', gap: '22px', justifyContent: 'center', alignItems: 'flex-start' });
+  wrap.appendChild(main);
+
+  /* ---------- 게임판 ---------- */
+  const boardOuter = h('div', {
+    width: 'min(92vw, 80vh, 640px)', padding: '14px 16px 16px 10px', background: 'linear-gradient(160deg,#1a160f,#100e0a)',
+    border: '2px solid #d4af37', borderRadius: '14px', boxSizing: 'border-box',
+    boxShadow: '0 0 0 4px #100e0a, 0 0 0 5px #8a7230, 0 24px 60px rgba(0,0,0,.65)'
+  });
+  const grid = h('div', { display: 'grid', gridTemplateColumns: '20px repeat(9,1fr)', gap: '5px' });
+  boardOuter.appendChild(grid);
+  main.appendChild(boardOuter);
+
+  const labelStyle = { color: '#8a7230', fontFamily: SERIF, fontSize: '13px', display: 'flex', alignItems: 'center', justifyContent: 'center' };
+  grid.appendChild(h('div', labelStyle, ''));
+  for (let c = 0; c < 9; c++) grid.appendChild(h('div', Object.assign({}, labelStyle, { paddingBottom: '2px' }), GK_COLS[c]));
+  const cells = [];
+  for (let r = 0; r < 9; r++) {
+    grid.appendChild(h('div', labelStyle, String(r + 1)));
+    for (let c = 0; c < 9; c++) {
+      const i = r * 9 + c;
+      const cell = h('div', {
+        position: 'relative', aspectRatio: '1 / 1', borderRadius: '7px', cursor: 'pointer',
+        boxShadow: 'inset 0 2px 3px rgba(255,255,255,.07), inset 0 -3px 6px rgba(0,0,0,.55)'
+      });
+      cell.className = 'gk-cell';
+      cell.addEventListener('click', () => onCell(i));
+      cell.addEventListener('mouseenter', () => { hover = i; render(); });
+      cell.addEventListener('mouseleave', () => { if (hover === i) { hover = -1; render(); } });
+      grid.appendChild(cell);
+      cells.push(cell);
+    }
+  }
+
+  /* ---------- 오른쪽 패널 ---------- */
+  const card = extra => Object.assign({
+    background: '#16130e', border: '1px solid #3a3122', borderRadius: '12px', padding: '14px 16px', boxSizing: 'border-box'
+  }, extra || {});
+  const panel = h('div', { width: '310px', maxWidth: '92vw', display: 'flex', flexDirection: 'column', gap: '12px' });
+  main.appendChild(panel);
+
+  const turnCard = h('div', card({ borderColor: '#8a7230' }));
+  const scoreCard = h('div', card());
+  const alertBox = h('div', card({ display: 'none', background: '#2a0f0c', borderColor: '#e0473a', color: '#ffd6d0', fontSize: '14px', lineHeight: '1.5' }));
+  const noteBox = h('div', { minHeight: '20px', fontSize: '13.5px', color: '#f3d98b', lineHeight: '1.5', padding: '0 4px' });
+  const btnRow = h('div', { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' });
+  const kifuCard = h('div', card({ padding: '12px 14px' }));
+  const gamePanel = h('div', { display: 'flex', flexDirection: 'column', gap: '12px' });
+  [turnCard, scoreCard, alertBox, noteBox, btnRow, kifuCard].forEach(e => gamePanel.appendChild(e));
+  panel.appendChild(gamePanel);
+
+  /* 연습모드 패널 */
+  const pzPanel = h('div', { display: 'none', flexDirection: 'column', gap: '12px' });
+  const pzLesson = h('div', card({ borderColor: '#8a7230' }));
+  const pzStatus = h('div', card({ fontSize: '14px', lineHeight: '1.6' }));
+  const pzBtnRow = h('div', { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' });
+  const pzProg = h('div', card({ padding: '12px 14px' }));
+  [pzLesson, pzStatus, pzBtnRow, pzProg].forEach(e => pzPanel.appendChild(e));
+  panel.appendChild(pzPanel);
+
+  function mkBtn(label, fn, primary) {
+    const b = h('button', {
+      background: primary ? '#3a2e14' : '#1d1912', color: primary ? '#f3d98b' : '#efe6cf',
+      border: '1px solid ' + (primary ? '#d4af37' : '#5a4b2c'), borderRadius: '9px', padding: '11px 6px',
+      fontSize: '15px', fontFamily: SANS, cursor: 'pointer', fontWeight: primary ? '700' : '500'
+    }, label);
+    b.className = 'gk-btn';
+    b.addEventListener('click', fn);
+    (mkBtn.target || btnRow).appendChild(b);
+    return b;
+  }
+  const passBtn = mkBtn('패스 <span style="opacity:.5;font-size:12px">(P)</span>', pass, true);
+  const undoBtn = mkBtn('↶ 무르기', undo);
+  const terrBtn = mkBtn('', () => { showTerr = !showTerr; render(); });
+  const rulesBtn = mkBtn('규칙 보기', showRules);
+  const newBtn = mkBtn('새 게임 / 설정', () => openSetup());
+  newBtn.style.gridColumn = '1 / 3';
+  mkBtn.target = pzBtnRow;
+  const pzHintBtn = mkBtn('💡 힌트', () => pzHint(), true);
+  mkBtn('↺ 다시 하기', () => pzStart(pz.k));
+  mkBtn('📋 단계 목록', () => openStageList());
+  mkBtn('⚔️ 실전 대전', () => { view = 'game'; render(); openSetup(); });
+  mkBtn.target = null;
+
+  const kifuTitle = h('div', { fontFamily: SERIF, color: '#d4af37', fontSize: '14px', marginBottom: '8px', letterSpacing: '2px' }, '기 보');
+  const kifuList = h('div', { maxHeight: '170px', overflowY: 'auto', fontSize: '13px', lineHeight: '1.75', display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '10px' });
+  kifuCard.appendChild(kifuTitle); kifuCard.appendChild(kifuList);
+
+  /* ---------- 모달 ---------- */
+  const overlay = h('div', {
+    position: 'fixed', inset: '0', background: 'rgba(5,4,2,.72)', display: 'none',
+    alignItems: 'center', justifyContent: 'center', zIndex: '50', padding: '16px', boxSizing: 'border-box'
+  });
+  const modal = h('div', {
+    background: 'linear-gradient(170deg,#1f1a11,#120f0a)', border: '2px solid #d4af37', borderRadius: '16px',
+    padding: '26px 26px 20px', width: '420px', maxWidth: '100%', maxHeight: '90vh', overflowY: 'auto',
+    boxShadow: '0 0 0 5px #120f0a, 0 0 0 6px #8a7230, 0 30px 80px rgba(0,0,0,.7)', animation: 'gkFade .25s ease-out', boxSizing: 'border-box'
+  });
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+  wrap.appendChild(overlay);
+
+  function openModal(html, buttons, keepAnim, wide) {
+    const wasOpen = overlay.style.display === 'flex';
+    modal.style.width = wide ? '560px' : '420px';
+    modal.innerHTML = html;
+    const row = h('div', { display: 'flex', gap: '8px', marginTop: '20px' });
+    buttons.forEach(([label, fn, primary]) => {
+      const b = h('button', {
+        flex: '1', background: primary ? '#3a2e14' : '#1d1912', color: primary ? '#f3d98b' : '#efe6cf',
+        border: '1px solid ' + (primary ? '#d4af37' : '#5a4b2c'), borderRadius: '9px', padding: '11px', fontSize: '15px',
+        fontFamily: SANS, cursor: 'pointer', fontWeight: '600'
+      }, label);
+      b.className = 'gk-btn';
+      b.addEventListener('click', fn);
+      row.appendChild(b);
+    });
+    modal.appendChild(row);
+    overlay.style.display = 'flex';
+    if (keepAnim && wasOpen) return;
+    modal.style.animation = 'none'; void modal.offsetWidth; modal.style.animation = 'gkFade .25s ease-out';
+  }
+  function closeModal() { overlay.style.display = 'none'; }
+
+  root.appendChild(wrap);
+
+  /* ---------- 동작 ---------- */
+  function onCell(i) {
+    if (view === 'practice') { pzClick(i); return; }
+    if (S.over || aiTurn()) return;
+    const ev = gkEvaluate(S.board, i, S.turn, S.stones);
+    if (!ev.ok) { note = '✕ ' + ev.reason; render(); return; }
+    if (ev.kind === 'suicide' && pendingSuicide !== i) {
+      pendingSuicide = i;
+      note = '⚠ 여기에 두면 내 성이 갇혀 파괴되고 패배합니다. 그래도 두려면 한 번 더 누르세요.';
+      render(); return;
+    }
+    doMove(i, ev);
+  }
+
+  function doMove(i, ev) {
+    hist.push(clone(S));
+    pendingSuicide = -1; note = '';
+    const p = S.turn;
+    S.board[i] = p; S.stones[p]--; S.passes = 0; S.lastMove = i; S.moves.push({ p, i });
+    if (ev.kind === 'capture') S.over = { winner: p, reason: 'capture', destroyed: ev.captured };
+    else if (ev.kind === 'suicide') S.over = { winner: 3 - p, reason: 'suicide', destroyed: ev.captured };
+    else S.turn = 3 - p;
+    render();
+    if (S.over) setTimeout(showResult, 450);
+    else maybeAI();
+  }
+
+  function pass() {
+    if (S.over || aiTurn()) return;
+    doPass();
+  }
+
+  function doPass() {
+    hist.push(clone(S));
+    pendingSuicide = -1;
+    S.moves.push({ p: S.turn, i: -1 });
+    S.passes++;
+    S.lastMove = -1;
+    if (S.passes >= 2) {
+      const sc = gkScore(gkTerritory(S.board));
+      S.over = { winner: (sc[1] - sc[2] >= 3) ? GK_BLUE : GK_ORANGE, reason: 'count', score: sc, destroyed: [] };
+      note = '';
+      render(); setTimeout(showResult, 300); return;
+    }
+    const next = 3 - S.turn;
+    note = who(S.turn) + '이 패스했습니다. ' + (cfg.mode === 'ai' && !isAI(next) ? '나도' : GK_NAME[next] + '도') +
+      ' 패스하면 게임이 끝나고 영토를 셉니다.';
+    S.turn = next;
+    render();
+    maybeAI();
+  }
+
+  function maybeAI() {
+    if (!aiTurn()) return;
+    thinking = true; render();
+    clearTimeout(aiTimer);
+    aiTimer = setTimeout(() => {
+      thinking = false;
+      if (!aiTurn()) { render(); return; }
+      const i = aiChooseMove(S, S.turn, cfg.level);
+      if (i < 0) { doPass(); return; }
+      const ev = gkEvaluate(S.board, i, S.turn, S.stones);
+      if (!ev.ok) { doPass(); return; }
+      doMove(i, ev);
+    }, 550);
+  }
+
+  function stopAI() { clearTimeout(aiTimer); thinking = false; }
+
+  function undo() {
+    if (!hist.length) return;
+    stopAI();
+    S = hist.pop();
+    // AI 대전: AI 수까지 함께 물러서 내 차례로
+    if (cfg.mode === 'ai' && isAI(S.turn) && hist.length) S = hist.pop();
+    pendingSuicide = -1; note = '한 수 물렀습니다.';
+    closeModal(); render(); maybeAI();
+  }
+
+  function reset() {
+    stopAI(); S = gkNew(); hist = []; pendingSuicide = -1; note = ''; closeModal(); render(); maybeAI();
+  }
+
+  function openSetup() {
+    const tmp = Object.assign({}, cfg);
+    const chip = (on, label, sub) =>
+      '<div style="flex:1;cursor:pointer;text-align:center;padding:10px 6px;border-radius:10px;border:1px solid ' + (on ? '#d4af37' : '#3a3122') +
+      ';background:' + (on ? '#3a2e14' : '#14110c') + ';color:' + (on ? '#f3d98b' : '#cfc5aa') + ';font-weight:' + (on ? '700' : '500') + ';font-size:15px">' +
+      label + (sub ? '<div style="font-size:11.5px;font-weight:400;color:#a39876;margin-top:2px">' + sub + '</div>' : '') + '</div>';
+    const sec = t => '<div style="font-size:12px;color:#a39876;letter-spacing:3px;margin:16px 0 7px">' + t + '</div>';
+    function draw() {
+      let html = '<div style="font-family:' + SERIF + ';color:#d4af37;font-size:22px;text-align:center;letter-spacing:3px">새 게임</div>' +
+        sec('대전 방식') + '<div style="display:flex;gap:8px" data-g="mode">' +
+        chip(tmp.mode === 'pvp', '👥 2인 대전', '한 컴퓨터에서 둘이') + chip(tmp.mode === 'ai', '🤖 AI 대전', '컴퓨터와 대결') + '</div>';
+      if (tmp.mode === 'ai') {
+        html += sec('AI 난이도') + '<div style="display:flex;gap:8px" data-g="level">' +
+          chip(tmp.level === 'easy', '쉬움', '가끔 실수') + chip(tmp.level === 'normal', '보통', '두 수 앞') + chip(tmp.level === 'hard', '어려움', '수읽기') + chip(tmp.level === 'master', '고수', '깊은 수읽기') + '</div>' +
+          sec('내 색') + '<div style="display:flex;gap:8px" data-g="human">' +
+          chip(tmp.human === 1, '<span style="color:#8fa8ff">■</span> 파랑', '선공 · 3개 더 따야 승리') + chip(tmp.human === 2, '<span style="color:#ffa865">■</span> 주황', '후공 · AI가 먼저 둠') + '</div>';
+      }
+      openModal(html, [['취소', closeModal], ['시작하기', () => { cfg = tmp; view = 'game'; reset(); }, true]], true);
+      const vals = { mode: ['pvp', 'ai'], level: ['easy', 'normal', 'hard', 'master'], human: [1, 2] };
+      modal.querySelectorAll('[data-g]').forEach(row => {
+        const key = row.getAttribute('data-g');
+        Array.from(row.children).forEach((ch, k) => ch.addEventListener('click', () => { tmp[key] = vals[key][k]; draw(); }));
+      });
+    }
+    draw();
+  }
+
+  function showResult() {
+    const o = S.over; if (!o) return;
+    const w = o.winner, l = 3 - w;
+    let body = '';
+    if (o.reason === 'capture') {
+      body = '<div style="font-size:15px;line-height:1.7;color:#d9cfb5">⚔️ ' + who(w) + '이 ' + who(l) + '의 성 <b style="color:#ff8a7a">' + o.destroyed.length + '개</b>를 포위해 파괴했습니다.</div>';
+    } else if (o.reason === 'suicide') {
+      body = '<div style="font-size:15px;line-height:1.7;color:#d9cfb5">' + GK_NAME[l] + '의 성이 스스로 갇혀 파괴되었습니다.</div>';
+    } else {
+      const d = o.score[1] - o.score[2];
+      body =
+        '<div style="display:flex;gap:10px;margin:4px 0 12px">' +
+        ['1', '2'].map(p => '<div style="flex:1;background:#14110c;border:1px solid ' + (+p === w ? '#d4af37' : '#3a3122') + ';border-radius:10px;padding:12px;text-align:center">' +
+          '<div style="width:34px;margin:0 auto 6px">' + piece(+p) + '</div>' +
+          '<div style="font-size:13px;color:#a39876">' + who(+p) + (p === '1' ? ' (선공)' : ' (후공)') + '</div>' +
+          '<div style="font-family:' + SERIF + ';font-size:30px;color:' + nameColor(+p) + '">' + o.score[p] + '</div>' +
+          '<div style="font-size:12px;color:#a39876">영토</div></div>').join('') +
+        '</div>' +
+        '<div style="font-size:14px;line-height:1.7;color:#d9cfb5">영토 차이: 파랑 ' + (d >= 0 ? '+' : '') + d + '<br>' +
+        '<span style="color:#a39876;font-size:13px">파랑(선공)은 영토가 3개 이상 많아야 승리합니다.</span></div>';
+    }
+    openModal(
+      '<div style="text-align:center;font-family:' + SERIF + ';color:#a39876;letter-spacing:6px;font-size:13px">' +
+      (o.reason === 'count' ? '영 토 계 산' : '성 파 괴') + '</div>' +
+      '<div style="text-align:center;margin:10px 0 4px"><div style="width:64px;margin:0 auto">' + piece(w) + '</div></div>' +
+      '<div style="text-align:center;font-family:' + SERIF + ';font-size:30px;color:#d4af37;margin-bottom:14px;text-shadow:0 2px 12px rgba(212,175,55,.4)">' +
+      (cfg.mode === 'ai' ? (isAI(w) ? 'AI 승리' : '🎉 내가 이겼다!') : GK_NAME[w] + ' 승리!') + '</div>' +
+      (cfg.mode === 'ai' ? '<div style="text-align:center;margin:-8px 0 14px;font-size:13px;color:#a39876">AI 난이도: ' + LEVEL_NAME[cfg.level] + '</div>' : '') + body,
+      [['판 보기', closeModal], ['↶ 무르기', undo], ['다시 하기', reset, true]]
+    );
+  }
+
+  function showRules() {
+    const li = t => '<li style="margin-bottom:7px">' + t + '</li>';
+    openModal(
+      '<div style="font-family:' + SERIF + ';color:#d4af37;font-size:22px;text-align:center;margin-bottom:14px;letter-spacing:3px">게임 규칙</div>' +
+      '<ol style="padding-left:20px;margin:0;font-size:14px;line-height:1.6;color:#d9cfb5">' +
+      li('파랑(선공)부터 번갈아 <b>성 1개를 놓거나 패스</b>합니다. 성은 한 사람당 40개입니다.') +
+      li('한가운데 <b>중립 성</b>은 누구의 것도 아니며, 가장자리처럼 막힌 곳으로 칩니다.') +
+      li('내 성(과 가장자리·중립 성)으로 상하좌우를 빈틈없이 둘러싼 빈칸이 <b>영토</b>입니다. 대각선은 상관없습니다.') +
+      li('둘러싼 곳에 상대 성이 하나라도 있으면 영토가 아닙니다.') +
+      li('가장자리 <b>4개 변을 모두</b> 이용한 영역은 영토가 아닙니다.') +
+      li('상대의 완성된 영토에는 성을 놓을 수 없습니다.') +
+      li('<b>공성</b>: 상대 성을 상하좌우 빈틈없이 둘러싸면 파괴하고 <b>즉시 승리</b>합니다. 양쪽이 동시에 파괴되는 상황이면 놓은 쪽이 이깁니다.') +
+      li('두 사람이 연달아 패스하면 영토를 셉니다. 파랑이 <b>3개 이상</b> 많으면 파랑, 아니면 주황이 승리합니다.') +
+      '</ol>',
+      [['닫기', closeModal, true]]
+    );
+  }
+
+  function onKey(e) {
+    if (e.key === 'Escape') { closeModal(); return; }
+    if (overlay.style.display === 'flex' || view !== 'game') return;
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undo(); return; }
+    if (e.key === 'p' || e.key === 'P' || e.key === 'ㅔ') pass();
+  }
+  window.addEventListener('keydown', onKey);
+
+  /* ---------- 그리기 ---------- */
+  function render() {
+    tabGame.style.background = view === 'game' ? '#3a2e14' : 'transparent';
+    tabGame.style.color = view === 'game' ? '#f3d98b' : '#a39876';
+    tabGame.style.borderColor = view === 'game' ? '#d4af37' : '#3a3122';
+    tabPz.style.background = view === 'practice' ? '#3a2e14' : 'transparent';
+    tabPz.style.color = view === 'practice' ? '#f3d98b' : '#a39876';
+    tabPz.style.borderColor = view === 'practice' ? '#d4af37' : '#3a3122';
+    gamePanel.style.display = view === 'game' ? 'flex' : 'none';
+    pzPanel.style.display = view === 'practice' ? 'flex' : 'none';
+    if (view === 'practice') { renderPractice(); return; }
+    const b = S.board, owner = gkTerritory(b), sc = gkScore(owner);
+    const threatened = S.over ? new Set() : gkThreats(b, 3 - S.turn, S.stones);
+    const destroyed = new Set((S.over && S.over.destroyed) || []);
+    const showOwner = showTerr || (S.over && S.over.reason === 'count');
+    const num = {};
+    if (S.over && S.over.reason === 'count') {
+      const cnt = { 1: 0, 2: 0 };
+      for (let i = 0; i < 81; i++) if (owner[i]) num[i] = ++cnt[owner[i]];
+    }
+
+    for (let i = 0; i < 81; i++) {
+      const el = cells[i], v = b[i], o = owner[i];
+      let bg = '#2a251c';
+      if (v === GK_EMPTY && o && showOwner) bg = o === 1 ? '#1f3566' : '#55311a';
+      el.style.background = bg;
+      el.style.cursor = (S.over || aiTurn()) ? 'default' : 'pointer';
+      let inner = '';
+      if (v === GK_NEUTRAL) {
+        inner = piece(3);
+      } else if (v === GK_BLUE || v === GK_ORANGE) {
+        const pulse = threatened.has(i) ? 'animation:gkPulse 1.1s ease-in-out infinite;border-radius:16%;' : '';
+        inner = '<div style="width:100%;height:100%;' + pulse + '">' + piece(v) + '</div>';
+        if (destroyed.has(i)) inner +=
+          '<svg viewBox="0 0 100 100" style="position:absolute;inset:0;width:100%;height:100%"><path d="M18 18 L82 82 M82 18 L18 82" stroke="#ffffff" stroke-width="15" stroke-linecap="round"/><path d="M18 18 L82 82 M82 18 L18 82" stroke="#e0473a" stroke-width="9" stroke-linecap="round"/></svg>';
+        if (i === S.lastMove && !destroyed.has(i)) inner +=
+          '<div style="position:absolute;right:-3px;top:-3px;width:28%;height:28%;border-radius:50%;background:#f3d98b;border:2px solid #100e0a;box-shadow:0 0 8px #d4af37"></div>';
+      } else {
+        if (num[i]) {
+          inner = '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:min(3.4vw,24px);color:' +
+            (o === 1 ? '#a9bcff' : '#ffb27a') + '">' + num[i] + '</div>';
+        } else if (!S.over && !aiTurn() && i === hover) {
+          const ev = gkEvaluate(b, i, S.turn, S.stones);
+          if (!ev.ok) {
+            inner = '<svg viewBox="0 0 100 100" width="100%" height="100%" style="display:block"><path d="M28 28 L72 72 M72 28 L28 72" stroke="#e0473a" stroke-width="10" stroke-linecap="round" opacity="0.85"/></svg>';
+          } else {
+            inner = '<div style="width:100%;height:100%;' + (ev.kind === 'suicide' ? 'box-shadow:0 0 0 3px #e0473a;border-radius:16%;' : '') +
+              (ev.kind === 'capture' ? 'box-shadow:0 0 0 3px #f3d98b,0 0 14px 4px rgba(243,217,139,.8);border-radius:16%;' : '') + '">' +
+              piece(S.turn, 0.5) + '</div>';
+          }
+        } else if (i === pendingSuicide) {
+          inner = '<div style="width:100%;height:100%;box-shadow:0 0 0 3px #e0473a;border-radius:16%">' + piece(S.turn, 0.5) + '</div>';
+        }
+      }
+      el.innerHTML = inner ? '<div style="position:absolute;inset:6%">' + inner + '</div>' : '';
+    }
+
+    // 차례 카드
+    const modeLine = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #2e2719;font-size:12px;color:#8a7f63">' +
+      (cfg.mode === 'ai' ? '🤖 AI 대전 · ' + LEVEL_NAME[cfg.level] + ' · 나는 <span style="color:' + nameColor(cfg.human) + '">' + GK_NAME[cfg.human] + '</span>' : '👥 2인 대전') + '</div>';
+    if (S.over) {
+      turnCard.innerHTML =
+        '<div style="display:flex;align-items:center;gap:14px"><div style="width:52px">' + piece(S.over.winner) + '</div>' +
+        '<div><div style="font-size:12px;color:#a39876;letter-spacing:3px">게임 종료</div>' +
+        '<div style="font-family:' + SERIF + ';font-size:24px;color:#d4af37">' + (cfg.mode === 'ai' ? (isAI(S.over.winner) ? 'AI 승리' : '내가 이겼다!') : GK_NAME[S.over.winner] + ' 승리!') + '</div></div></div>' + modeLine;
+    } else {
+      const p = S.turn, ai = isAI(p);
+      turnCard.innerHTML =
+        '<div style="display:flex;align-items:center;gap:14px"><div style="width:52px;filter:drop-shadow(0 0 10px ' + (p === 1 ? 'rgba(80,120,255,.6)' : 'rgba(255,130,50,.6)') + ')">' + piece(p) + '</div>' +
+        '<div style="flex:1"><div style="font-size:12px;color:#a39876;letter-spacing:3px">' + (S.moves.length + 1) + '수째 · 차례</div>' +
+        '<div style="font-family:' + SERIF + ';font-size:24px;color:' + nameColor(p) + '">' + GK_NAME[p] + ' <span style="font-size:14px;color:#a39876">' +
+        (cfg.mode === 'ai' ? (ai ? 'AI' : '나') : (p === 1 ? '선공' : '후공')) + '</span></div>' +
+        (ai && thinking ? '<div style="font-size:12.5px;color:#f3d98b;animation:gkBlink 1s ease-in-out infinite">🤖 생각 중…</div>' : '') + '</div>' +
+        '<div style="text-align:right"><div style="font-size:11px;color:#a39876">남은 성</div><div style="font-family:' + SERIF + ';font-size:22px;color:#efe6cf">' + S.stones[p] + '</div></div></div>' + modeLine;
+    }
+
+    // 점수 카드
+    const d = sc[1] - sc[2];
+    const row = p =>
+      '<div style="display:flex;align-items:center;gap:10px;padding:6px 0">' +
+      '<div style="width:26px">' + piece(p) + '</div>' +
+      '<div style="flex:1;font-size:14px">' + who(p) + ' <span style="color:#a39876;font-size:12px">· 남은 성 ' + S.stones[p] + '</span></div>' +
+      '<div style="font-family:' + SERIF + ';font-size:24px;color:' + nameColor(p) + ';min-width:34px;text-align:right">' + sc[p] + '</div></div>';
+    const lead = d >= 3 ? 1 : 2;
+    scoreCard.innerHTML =
+      '<div style="font-family:' + SERIF + ';color:#d4af37;font-size:14px;letter-spacing:2px;margin-bottom:4px;display:flex;justify-content:space-between"><span>영 토</span><span style="font-family:' + SANS + ';font-size:11px;color:#8a7230;letter-spacing:0">칸 수</span></div>' +
+      row(1) + '<div style="height:1px;background:#2e2719"></div>' + row(2) +
+      '<div style="margin-top:8px;padding-top:9px;border-top:1px dashed #3a3122;font-size:13px;color:#d9cfb5">현재 형세: <b style="color:' + nameColor(lead) + '">' + GK_NAME[lead] + ' 우세</b>' +
+      ' <span style="color:#a39876">(차이 ' + (d >= 0 ? '+' : '') + d + ')</span>' +
+      '<div style="font-size:11.5px;color:#8a7f63;margin-top:3px">파랑(선공)은 영토가 3개 이상 많아야 승리</div></div>';
+
+    // 공격 알림
+    if (threatened.size) {
+      const atk = 3 - S.turn;
+      alertBox.style.display = 'block';
+      alertBox.innerHTML = '<div style="font-family:' + SERIF + ';font-size:20px;color:#ff8a7a;margin-bottom:3px;letter-spacing:2px">⚔️ 공격!</div>' +
+        who(atk) + '이 다음 수에 ' + who(S.turn) + '의 성을 파괴할 수 있습니다. <b>빨갛게 빛나는 성</b>을 지키세요!';
+    } else alertBox.style.display = 'none';
+
+    noteBox.textContent = note;
+
+    // 버튼
+    passBtn.disabled = !!S.over || aiTurn();
+    undoBtn.disabled = !hist.length;
+    terrBtn.innerHTML = '영토 표시 ' + (showTerr ? '<b style="color:#f3d98b">ON</b>' : '<span style="opacity:.6">OFF</span>');
+
+    // 기보
+    if (!S.moves.length) kifuList.innerHTML = '<div style="color:#6f6650;grid-column:1/3">아직 둔 수가 없습니다.</div>';
+    else {
+      kifuList.innerHTML = S.moves.map((m, k) =>
+        '<div><span style="color:#6f6650;display:inline-block;width:26px">' + (k + 1) + '.</span>' +
+        '<span style="color:' + nameColor(m.p) + '">' + GK_NAME[m.p] + (isAI(m.p) ? '<span style="font-size:10px;color:#8a7f63"> AI</span>' : '') + '</span> ' +
+        (m.i < 0 ? '<span style="color:#a39876">패스</span>' : '<b>' + gkCoord(m.i) + '</b>') + '</div>').join('');
+      kifuList.scrollTop = kifuList.scrollHeight;
+    }
+  }
+
+  /* =========================================================
+     연습모드
+     ========================================================= */
+  const X_SVG = '<svg viewBox="0 0 100 100" style="position:absolute;inset:0;width:100%;height:100%"><path d="M18 18 L82 82 M82 18 L18 82" stroke="#ffffff" stroke-width="15" stroke-linecap="round"/><path d="M18 18 L82 82 M82 18 L18 82" stroke="#e0473a" stroke-width="9" stroke-linecap="round"/></svg>';
+  const BIG = { 1: 99, 2: 99 };
+
+  function pzStart(k) {
+    stopAI();
+    const st = PZ_STAGES[k];
+    pz = { k, board: pzBoard(st.rows), used: 0, done: null, why: '', destroyed: [], lastMove: -1, hint: -1, busy: false,
+      msg: '', marks: [] };
+    view = 'practice';
+    closeModal(); render();
+  }
+
+  function pzLeft() { const g = PZ_STAGES[pz.k].goal; return (g.moves || 1) - pz.used; }
+
+  function pzFinish(ok, why) {
+    pz.done = ok ? 'win' : 'fail'; pz.why = why || ''; pz.busy = false; pz.hint = -1;
+    render();
+    if (ok) {
+      cleared[pz.k] = true; saveCleared();
+      setTimeout(pzSuccessModal, 500);
+    }
+  }
+
+  function pzSuccessModal() {
+    const st = PZ_STAGES[pz.k], next = pz.k + 1 < PZ_STAGES.length ? pz.k + 1 : -1;
+    const allDone = PZ_STAGES.every((_, k) => cleared[k]);
+    openModal(
+      '<div style="text-align:center;font-family:' + SERIF + ';color:#a39876;letter-spacing:5px;font-size:13px">' + st.ch + '장 · ' + CH_NAME[st.ch] + '</div>' +
+      '<div style="text-align:center;font-size:44px;margin:8px 0 2px">🎉</div>' +
+      '<div style="text-align:center;font-family:' + SERIF + ';font-size:28px;color:#d4af37;text-shadow:0 2px 12px rgba(212,175,55,.4)">성공!</div>' +
+      '<div style="text-align:center;font-size:14px;color:#a39876;margin:2px 0 16px">' + stageLabel(pz.k) + ' ' + st.title + '</div>' +
+      '<div style="background:#14110c;border:1px solid #3a3122;border-left:3px solid #d4af37;border-radius:8px;padding:12px 14px;font-size:14px;line-height:1.7;color:#d9cfb5">' +
+      '<div style="font-size:12px;color:#d4af37;letter-spacing:2px;margin-bottom:4px">📌 기억하기</div>' + st.tip + '</div>' +
+      (allDone ? '<div style="margin-top:14px;text-align:center;font-size:14px;color:#f3d98b">모든 연습을 마쳤어요! 이제 AI와 실전 대결을 해 보세요.</div>' : ''),
+      next >= 0
+        ? [['판 보기', closeModal], ['다음 단계 ▶', () => pzStart(next), true]]
+        : [['판 보기', closeModal], ['⚔️ 실전 대전', () => { view = 'game'; render(); openSetup(); }, true]]
+    );
+  }
+
+  const stageLabel = k => { const ch = PZ_STAGES[k].ch; return ch + '-' + (PZ_STAGES.filter((s, j) => s.ch === ch && j <= k).length); };
+
+  function pzPlace(i, p) {
+    const ev = gkEvaluate(pz.board, i, p, BIG);
+    pz.board[i] = p; pz.lastMove = i;
+    if (ev.kind === 'capture') pz.destroyed = ev.captured;
+    return ev;
+  }
+
+  function pzClick(i) {
+    if (!pz || pz.done || pz.busy) return;
+    const st = PZ_STAGES[pz.k], g = st.goal, b = pz.board;
+    const ev = gkEvaluate(b, i, 1, BIG);
+    if (!ev.ok) { pz.msg = '✕ ' + ev.reason; render(); return; }
+    if (ev.kind === 'suicide') { pz.msg = '✕ 그 자리는 내 성이 갇혀서 파괴돼요.'; render(); return; }
+    pz.hint = -1; pz.msg = ''; pz.marks = [];
+
+    if (g.type === 'save' || g.type === 'deny' || g.type === 'diff') {
+      const res = pzCheckOne(st, b, i);
+      pzPlace(i, 1); pz.used++;
+      if (res.ok) { pzFinish(true); return; }
+      // 실패: 상대의 응수를 보여 주기
+      pz.busy = true; render();
+      setTimeout(() => {
+        let reply = res.reply != null ? res.reply : -1, why = res.why || '';
+        if (g.type === 'save' && reply < 0) reply = pzFindWin(pz.board, 2, g.depth);
+        if (reply >= 0) {
+          const ev2 = pzPlace(reply, 2);
+          if (g.type === 'save') why = why || '주황이 ' + gkCoord(reply) + '에 두며 계속 몰아붙여요. 숨구멍이 금방 다시 막혀요.';
+          if (ev2.kind === 'capture') why = '주황이 ' + gkCoord(reply) + '에 두어 내 성을 파괴했어요.';
+          else if (g.type === 'deny') why = '주황이 ' + gkCoord(reply) + '에 두면 영토를 완성할 수 있어요.';
+          else if (g.type === 'diff') {
+            const sc = gkScore(gkTerritory(pz.board));
+            why = '주황이 ' + gkCoord(reply) + '에 두면 영토가 파랑 ' + sc[1] + ' : 주황 ' + sc[2] + '이 돼요.';
+          }
+        }
+        pzFinish(false, why || '정답이 아니에요.');
+      }, 650);
+      return;
+    }
+
+    pzPlace(i, 1); pz.used++;
+    if (g.type === 'territory') {
+      const sc = gkScore(gkTerritory(pz.board));
+      if (sc[1] >= g.target) { pzFinish(true); return; }
+      if (pzLeft() <= 0) { pzFinish(false, '영토가 ' + sc[1] + '칸이에요. ' + g.target + '칸을 만들어야 해요.'); return; }
+      pz.msg = '좋아요! 주황은 쉬고 있어요. 한 수 더 두세요.';
+      render(); return;
+    }
+    if (g.type === 'capture') {
+      if (ev.kind === 'capture') { pzFinish(true); return; }
+      if (pzLeft() <= 0) { pzFinish(false, g.moves + '수 안에 파괴하지 못했어요.'); return; }
+      pz.busy = true; pz.msg = '🤖 주황이 막을 곳을 찾는 중…'; render();
+      setTimeout(() => {
+        const j = pzDefenderReply(pz.board, 2, 1, pzLeft());
+        if (j >= 0 && pz.board[j] === GK_EMPTY) {
+          const ev2 = pzPlace(j, 2);
+          if (ev2.kind === 'capture') { pzFinish(false, '주황이 ' + gkCoord(j) + '에 두어 내 성을 먼저 파괴했어요.'); return; }
+          pz.msg = '주황이 ' + gkCoord(j) + '에 두었어요. 남은 수: ' + pzLeft();
+        } else pz.msg = '주황이 패스했어요. 남은 수: ' + pzLeft();
+        pz.busy = false; render();
+      }, 600);
+    }
+  }
+
+  function pzHint() {
+    if (!pz || pz.done || pz.busy) return;
+    const st = PZ_STAGES[pz.k], g = st.goal;
+    let h = -1;
+    if (pz.used === 0) h = pzIdx(st.hint);
+    else if (g.type === 'capture') h = pzFindWin(pz.board, 1, pzLeft());
+    else if (g.type === 'territory') {
+      for (let i = 0; i < 81 && h < 0; i++) {
+        if (pz.board[i] !== GK_EMPTY) continue;
+        const r = aiApply(pz.board, i, 1);
+        if (r.kind === 'normal' && gkScore(gkTerritory(r.nb))[1] >= g.target) h = i;
+      }
+    }
+    if (h < 0) { pz.msg = '이미 정답에서 벗어났어요. ↺ 다시 하기를 눌러 보세요.'; render(); return; }
+    pz.hint = h; pz.msg = '💡 금색으로 빛나는 칸을 잘 살펴보세요.'; render();
+  }
+
+  function openStageList() {
+    let html = '<div style="font-family:' + SERIF + ';color:#d4af37;font-size:22px;text-align:center;letter-spacing:3px">연습모드</div>' +
+      '<div style="text-align:center;font-size:13px;color:#a39876;margin:4px 0 6px">단계를 하나씩 깨면서 그레이트 킹덤의 전략을 배워요</div>';
+    for (let ch = 1; ch <= 5; ch++) {
+      html += '<div style="font-size:13px;color:#d4af37;letter-spacing:2px;margin:16px 0 7px">' + ch + '장 · ' + CH_NAME[ch] + '</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:7px">';
+      PZ_STAGES.forEach((st, k) => {
+        if (st.ch !== ch) return;
+        const done = !!cleared[k], open = isUnlocked(k);
+        html += '<div class="gk-stage" data-k="' + k + '" style="cursor:' + (open ? 'pointer' : 'default') + ';padding:9px 10px;border-radius:9px;' +
+          'border:1px solid ' + (done ? '#8a7230' : open ? '#5a4b2c' : '#2a241a') + ';background:' + (done ? '#2a2210' : open ? '#1a160f' : '#100e0a') + ';' +
+          'opacity:' + (open ? 1 : 0.45) + ';font-size:13.5px;color:' + (open ? '#efe6cf' : '#6f6650') + '">' +
+          '<span style="color:' + (done ? '#f3d98b' : '#8a7230') + ';font-weight:700;margin-right:5px">' + (done ? '✓' : open ? stageLabel(k) : '🔒') + '</span>' +
+          (done ? '<span style="color:#a39876;margin-right:4px">' + stageLabel(k) + '</span>' : '') + st.title + '</div>';
+      });
+      html += '</div>';
+    }
+    const n = cleared.filter(Boolean).length;
+    html += '<div style="margin-top:16px;font-size:12.5px;color:#a39876;text-align:center">완료 ' + n + ' / ' + PZ_STAGES.length + '</div>';
+    openModal(html, [['진행 초기화', () => { if (confirm('연습 기록을 모두 지울까요?')) { cleared = []; saveCleared(); openStageList(); } }],
+      ['닫기', () => { closeModal(); if (!pz) { view = 'game'; render(); } }, true]], false, true);
+    modal.querySelectorAll('[data-k]').forEach(el => {
+      const k = +el.getAttribute('data-k');
+      if (isUnlocked(k)) el.addEventListener('click', () => pzStart(k));
+    });
+  }
+
+  function openHome() {
+    openModal(
+      '<div style="text-align:center;font-family:' + SERIF + ';color:#d4af37;font-size:24px;letter-spacing:4px;margin-bottom:6px">어서 오세요</div>' +
+      '<div style="text-align:center;font-size:14px;color:#a39876;margin-bottom:6px">무엇을 할까요?</div>',
+      [['📘 연습모드', () => { openStageList(); }], ['⚔️ 대전하기', () => openSetup(), true]]
+    );
+  }
+
+  function renderPractice() {
+    if (!pz) pzStart(0);
+    const st = PZ_STAGES[pz.k], g = st.goal, b = pz.board, owner = gkTerritory(b);
+    const threatened = pz.done ? new Set() : gkThreats(b, 2, BIG);
+    const destroyed = new Set(pz.destroyed);
+    for (let i = 0; i < 81; i++) {
+      const el = cells[i], v = b[i], o = owner[i];
+      el.style.background = (v === GK_EMPTY && o) ? (o === 1 ? '#1f3566' : '#55311a') : '#2a251c';
+      el.style.cursor = (pz.done || pz.busy) ? 'default' : 'pointer';
+      let inner = '';
+      if (v === GK_NEUTRAL) inner = piece(3);
+      else if (v === GK_BLUE || v === GK_ORANGE) {
+        const pulse = threatened.has(i) ? 'animation:gkPulse 1.1s ease-in-out infinite;border-radius:16%;' : '';
+        inner = '<div style="width:100%;height:100%;' + pulse + '">' + piece(v) + '</div>';
+        if (destroyed.has(i)) inner += X_SVG;
+        if (i === pz.lastMove && !destroyed.has(i)) inner +=
+          '<div style="position:absolute;right:-3px;top:-3px;width:28%;height:28%;border-radius:50%;background:#f3d98b;border:2px solid #100e0a;box-shadow:0 0 8px #d4af37"></div>';
+      } else if (i === pz.hint) {
+        inner = '<div style="width:100%;height:100%;border-radius:16%;animation:gkHint 1.2s ease-in-out infinite"></div>';
+      } else if (!pz.done && !pz.busy && i === hover) {
+        const ev = gkEvaluate(b, i, 1, BIG);
+        inner = (!ev.ok || ev.kind === 'suicide')
+          ? '<svg viewBox="0 0 100 100" width="100%" height="100%" style="display:block"><path d="M28 28 L72 72 M72 28 L28 72" stroke="#e0473a" stroke-width="10" stroke-linecap="round" opacity="0.85"/></svg>'
+          : '<div style="width:100%;height:100%">' + piece(1, 0.5) + '</div>';
+      }
+      el.innerHTML = inner ? '<div style="position:absolute;inset:6%">' + inner + '</div>' : '';
+    }
+
+    const sc = gkScore(owner);
+    let goalLine = '';
+    if (g.type === 'capture') goalLine = g.moves === 1 ? '한 수로 해결' : '남은 수 <b style="color:#f3d98b;font-size:16px">' + Math.max(0, pzLeft()) + '</b> / ' + g.moves;
+    else if (g.type === 'territory') goalLine = '내 영토 <b style="color:#8fa8ff;font-size:16px">' + sc[1] + '</b> / ' + g.target + '칸 · 남은 수 <b style="color:#f3d98b">' + Math.max(0, pzLeft()) + '</b>';
+    else goalLine = '한 수로 해결';
+    pzLesson.innerHTML =
+      '<div style="font-size:12px;color:#a39876;letter-spacing:2px">' + st.ch + '장 · ' + CH_NAME[st.ch] + '</div>' +
+      '<div style="font-family:' + SERIF + ';font-size:21px;color:#d4af37;margin:3px 0 10px"><span style="color:#8a7230;font-size:16px;margin-right:6px">' + stageLabel(pz.k) + '</span>' + st.title + '</div>' +
+      '<div style="font-size:14px;line-height:1.7;color:#d9cfb5">' + st.lesson + '</div>' +
+      '<div style="margin-top:12px;padding:10px 12px;background:#14110c;border:1px solid #3a3122;border-radius:9px">' +
+      '<div style="font-size:12px;color:#d4af37;letter-spacing:2px;margin-bottom:3px">🎯 목표</div>' +
+      '<div style="font-size:14.5px;line-height:1.6;color:#efe6cf">' + st.task + '</div>' +
+      '<div style="font-size:12.5px;color:#a39876;margin-top:6px">' + goalLine + '</div></div>';
+
+    if (pz.done === 'win') {
+      pzStatus.style.background = '#1c1a0c'; pzStatus.style.borderColor = '#d4af37';
+      pzStatus.innerHTML = '<div style="font-family:' + SERIF + ';font-size:20px;color:#f3d98b">🎉 성공!</div><div style="color:#d9cfb5">' + st.tip + '</div>';
+    } else if (pz.done === 'fail') {
+      pzStatus.style.background = '#2a0f0c'; pzStatus.style.borderColor = '#e0473a';
+      pzStatus.innerHTML = '<div style="font-family:' + SERIF + ';font-size:20px;color:#ff8a7a">아쉬워요!</div><div style="color:#ffd6d0">' + pz.why +
+        '</div><div style="color:#a39876;font-size:13px;margin-top:4px">↺ 다시 하기를 눌러 다시 도전하세요. 막히면 💡 힌트!</div>';
+    } else {
+      pzStatus.style.background = '#16130e'; pzStatus.style.borderColor = '#3a3122';
+      pzStatus.innerHTML = '<div style="color:' + (pz.msg ? '#f3d98b' : '#8a7f63') + '">' + (pz.msg || '파랑(나)의 차례예요. 칸을 눌러 성을 놓으세요.') + '</div>';
+    }
+    pzHintBtn.disabled = !!pz.done || pz.busy;
+
+    const n = cleared.filter(Boolean).length, tot = PZ_STAGES.length;
+    pzProg.innerHTML = '<div style="display:flex;justify-content:space-between;font-size:12.5px;color:#a39876;margin-bottom:6px"><span>연습 진도</span><span>' + n + ' / ' + tot + '</span></div>' +
+      '<div style="height:8px;background:#0e0c08;border-radius:4px;overflow:hidden;border:1px solid #2e2719"><div style="height:100%;width:' + (n / tot * 100) + '%;background:linear-gradient(90deg,#8a7230,#f3d98b)"></div></div>';
+  }
+
+  render();
+  openHome();
+  return () => { stopAI(); window.removeEventListener('keydown', onKey); root.innerHTML = ''; };
+}
+
+mountGreatKingdom(document.getElementById("app"));
+</script></body></html>
