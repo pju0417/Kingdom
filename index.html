@@ -898,7 +898,13 @@ function mountGreatKingdom(root) {
   mkBtn('⚔️ 실전 대전', () => { view = 'game'; render(); openSetup(); });
   mkBtn.target = null;
 
-  const kifuTitle = h('div', { fontFamily: SERIF, color: '#d4af37', fontSize: '14px', marginBottom: '8px', letterSpacing: '2px' }, '기 보');
+  const kifuTitle = h('div', { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' },
+    '<span style="font-family:' + SERIF + ';color:#d4af37;font-size:14px;letter-spacing:2px">기 보</span>');
+  const kifuSaveBtn = h('button', { background: '#1d1912', color: '#f3d98b', border: '1px solid #8a7230', borderRadius: '7px', padding: '4px 10px',
+    fontSize: '12.5px', fontFamily: SANS, cursor: 'pointer' }, '🖼 이미지로 저장');
+  kifuSaveBtn.className = 'gk-btn';
+  kifuSaveBtn.addEventListener('click', () => openKifuImage());
+  kifuTitle.appendChild(kifuSaveBtn);
   const kifuList = h('div', { maxHeight: '170px', overflowY: 'auto', fontSize: '13px', lineHeight: '1.75', display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '10px' });
   kifuCard.appendChild(kifuTitle); kifuCard.appendChild(kifuList);
 
@@ -1107,6 +1113,10 @@ function mountGreatKingdom(root) {
         ? [['판 보기', closeModal], ['나가기', () => { leaveOnline(); closeModal(); openSetup(); }], ['다시 하기 (색 바꿔서)', requestRematch, true]]
         : [['판 보기', closeModal], ['↶ 무르기', undo], ['다시 하기', reset, true]]
     );
+    const kl = h('div', { textAlign: 'center', marginTop: '12px' });
+    const kb = h('button', { background: 'transparent', border: 'none', color: '#f3d98b', fontSize: '14px', fontFamily: SANS, cursor: 'pointer', textDecoration: 'underline' }, '🖼 이 판의 기보를 이미지로 저장');
+    kb.addEventListener('click', () => openKifuImage());
+    kl.appendChild(kb); modal.appendChild(kl);
   }
 
   function showRules() {
@@ -1197,7 +1207,7 @@ function mountGreatKingdom(root) {
     const modeLine = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #2e2719;font-size:12px;color:#8a7f63">' +
       (online() ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:' + (net.connected ? '#5fd36b' : '#e0473a') +
         ';box-shadow:0 0 6px ' + (net.connected ? '#5fd36b' : '#e0473a') + '"></span>🌐 온라인 · 방 <b style="color:#f3d98b;letter-spacing:1px">' + net.code + '</b> · ' +
-        (net.connected ? '연결됨' : '연결 끊김') :
+        (net.connected ? (net.via === 'relay' ? '연결됨 · 중계' : '연결됨 · 직접') : '연결 끊김') :
       cfg.mode === 'ai' ? '🤖 AI 대전 · ' + LEVEL_NAME[cfg.level] + ' · 나는 <span style="color:' + nameColor(cfg.human) + '">' + GK_NAME[cfg.human] + '</span>' : '👥 2인 대전') + '</div>';
     if (S.over) {
       turnCard.innerHTML =
@@ -1255,6 +1265,7 @@ function mountGreatKingdom(root) {
     }
     terrBtn.innerHTML = '영토 표시 ' + (showTerr ? '<b style="color:#f3d98b">ON</b>' : '<span style="opacity:.6">OFF</span>');
 
+    kifuSaveBtn.disabled = !S.moves.length;
     // 기보
     if (!S.moves.length) kifuList.innerHTML = '<div style="color:#6f6650;grid-column:1/3">아직 둔 수가 없습니다.</div>';
     else {
@@ -1487,6 +1498,107 @@ function mountGreatKingdom(root) {
   }
 
 
+
+  /* =========================================================
+     기보 이미지 저장
+     ========================================================= */
+  function kifuCanvas() {
+    const SC = 2, W = 1200, H = 760;
+    const cv = document.createElement('canvas'); cv.width = W * SC; cv.height = H * SC;
+    const x = cv.getContext('2d'); x.scale(SC, SC);
+    const KS = "'Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR','Noto Sans CJK KR',sans-serif";
+    const KR = "'AppleMyungjo','Batang','Noto Serif KR','Noto Serif CJK KR',Georgia,serif";
+    const rr = (px, py, w, hh, r) => { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + hh, r); x.arcTo(px + w, py + hh, px, py + hh, r); x.arcTo(px, py + hh, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); };
+    const g = x.createRadialGradient(W / 2, 0, 50, W / 2, 0, 900); g.addColorStop(0, '#221d13'); g.addColorStop(1, '#0b0a08');
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+    x.strokeStyle = '#d4af37'; x.lineWidth = 2; rr(14, 14, W - 28, H - 28, 16); x.stroke();
+    x.strokeStyle = '#8a7230'; x.lineWidth = 1; rr(20, 20, W - 40, H - 40, 12); x.stroke();
+    // 제목
+    x.textAlign = 'center'; x.fillStyle = '#d4af37'; x.font = '600 34px ' + KR; x.fillText('GREAT KINGDOM', W / 2, 68);
+    const now = new Date(), pad = n => String(n).padStart(2, '0');
+    const dateStr = now.getFullYear() + '. ' + (now.getMonth() + 1) + '. ' + now.getDate() + '. ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+    const modeStr = online() ? '온라인 대전 · 방 ' + net.code : cfg.mode === 'ai' ? 'AI 대전 · ' + LEVEL_NAME[cfg.level] : '2인 대전';
+    x.fillStyle = '#a39876'; x.font = '15px ' + KS; x.fillText('기 보   ·   ' + modeStr + '   ·   ' + dateStr, W / 2, 96);
+    // 판
+    const owner = gkTerritory(S.board), num = {};
+    S.moves.forEach((m, k) => { if (m.i >= 0) num[m.i] = k + 1; });
+    const destroyed = new Set((S.over && S.over.destroyed) || []);
+    const bx = 60, by = 150, cs = 62;
+    x.fillStyle = '#14110c'; rr(bx - 10, by - 10, cs * 9 + 20, cs * 9 + 20, 12); x.fill();
+    x.strokeStyle = '#d4af37'; x.lineWidth = 2; x.stroke();
+    x.fillStyle = '#8a7230'; x.font = '14px ' + KR;
+    for (let k = 0; k < 9; k++) { x.fillText(GK_COLS[k], bx + k * cs + cs / 2, by - 18); x.fillText(String(k + 1), bx - 26, by + k * cs + cs / 2 + 5); }
+    const PC = { 1: ['#2b54d6', '#9db3ff'], 2: ['#d8641c', '#ffc48f'], 3: ['#b9bec6', '#ffffff'] };
+    for (let i = 0; i < 81; i++) {
+      const px = bx + (i % 9) * cs, py = by + Math.floor(i / 9) * cs, v = S.board[i];
+      x.fillStyle = (v === GK_EMPTY && owner[i]) ? (owner[i] === 1 ? '#1f3566' : '#55311a') : '#2a251c';
+      rr(px + 3, py + 3, cs - 6, cs - 6, 7); x.fill();
+      if (v) {
+        x.fillStyle = PC[v][0]; rr(px + 6, py + 6, cs - 12, cs - 12, 9); x.fill();
+        x.strokeStyle = PC[v][1]; x.lineWidth = 2; x.stroke();
+        if (v === GK_NEUTRAL) { x.fillStyle = '#5d636c'; x.font = 'bold 13px ' + KS; x.fillText('중립', px + cs / 2, py + cs / 2 + 5); }
+        else if (num[i]) { x.fillStyle = '#ffffff'; x.font = 'bold ' + (num[i] >= 10 ? 21 : 23) + 'px ' + KS; x.fillText(String(num[i]), px + cs / 2, py + cs / 2 + 8); }
+        if (destroyed.has(i)) {
+          x.strokeStyle = 'rgba(255,90,72,.9)'; x.lineWidth = 5; x.lineCap = 'round';
+          x.beginPath(); x.moveTo(px + 14, py + 14); x.lineTo(px + cs - 14, py + cs - 14); x.moveTo(px + cs - 14, py + 14); x.lineTo(px + 14, py + cs - 14); x.stroke();
+        }
+      }
+    }
+    // 오른쪽: 대국자 · 결과
+    const rx = 680, rw = 470;
+    x.textAlign = 'left';
+    const sc = gkScore(owner);
+    [1, 2].forEach((p, k) => {
+      const yy = 150 + k * 52;
+      x.fillStyle = PC[p][0]; rr(rx, yy, 34, 34, 7); x.fill(); x.strokeStyle = PC[p][1]; x.lineWidth = 2; x.stroke();
+      x.fillStyle = '#efe6cf'; x.font = 'bold 20px ' + KS; x.fillText(who(p), rx + 48, yy + 24);
+      x.fillStyle = '#a39876'; x.font = '15px ' + KS; x.fillText(GK_NAME[p] + (p === 1 ? ' · 선공' : ' · 후공') + '   영토 ' + sc[p] + '칸', rx + 48 + Math.min(220, x.measureText(who(p)).width * 1.35 + 14), yy + 23);
+    });
+    let res;
+    if (S.over) {
+      const o = S.over, why = o.reason === 'capture' ? '성 파괴' : o.reason === 'resign' ? '기권' : o.reason === 'suicide' ? '상대 성 자멸' :
+        '영토 계산 (파랑 ' + o.score[1] + ' : 주황 ' + o.score[2] + ')';
+      res = who(o.winner) + ' 승리  —  ' + why;
+    } else res = '대국 중 (' + S.moves.length + '수까지)';
+    x.fillStyle = '#1c1a0c'; rr(rx, 262, rw, 50, 10); x.fill(); x.strokeStyle = '#8a7230'; x.lineWidth = 1.5; x.stroke();
+    x.fillStyle = '#f3d98b'; x.font = 'bold 19px ' + KS; x.fillText((S.over ? '🏆 ' : '⏳ ') + res, rx + 16, 294);
+    // 수 목록
+    x.fillStyle = '#d4af37'; x.font = '15px ' + KR; x.fillText('수 순   (' + S.moves.length + '수)', rx, 346);
+    x.strokeStyle = '#3a3122'; x.lineWidth = 1; x.beginPath(); x.moveTo(rx, 356); x.lineTo(rx + rw, 356); x.stroke();
+    const cols = 4, rows = 20, cw = rw / cols;
+    S.moves.slice(0, cols * rows).forEach((m, k) => {
+      const cx = rx + Math.floor(k / rows) * cw, cy = 378 + (k % rows) * 18.5;
+      x.fillStyle = '#6f6650'; x.font = '13px ' + KS; x.fillText((k + 1) + '.', cx, cy);
+      x.fillStyle = m.p === 1 ? '#8fa8ff' : '#ffa865'; x.font = '13px ' + KS; x.fillText(GK_NAME[m.p], cx + 26, cy);
+      x.fillStyle = '#efe6cf'; x.font = 'bold 13px ' + KS;
+      x.fillText(m.i === -1 ? '패스' : m.i === -2 ? '기권' : gkCoord(m.i), cx + 60, cy);
+    });
+    if (S.moves.length > cols * rows) { x.fillStyle = '#a39876'; x.font = '12px ' + KS; x.fillText('… 외 ' + (S.moves.length - cols * rows) + '수', rx, H - 74); }
+    // 바닥글
+    x.textAlign = 'left'; x.fillStyle = '#6f6650'; x.font = '12.5px ' + KS;
+    x.fillText('숫자 = 둔 순서  ·  색칠된 빈칸 = 영토  ·  ✕ = 파괴된 성', rx, H - 52);
+    return cv;
+  }
+
+  function openKifuImage() {
+    if (!S.moves.length) return;
+    let url;
+    try { url = kifuCanvas().toDataURL('image/png'); } catch (e) { toast('이미지를 만들지 못했어요'); return; }
+    const d = new Date(), pad = n => String(n).padStart(2, '0');
+    const fname = '그레이트킹덤_기보_' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' + pad(d.getHours()) + pad(d.getMinutes()) + '.png';
+    openModal('<div style="font-family:' + SERIF + ';color:#d4af37;font-size:20px;text-align:center;letter-spacing:3px;margin-bottom:12px">기보 이미지</div>' +
+      '<img src="' + url + '" style="width:100%;border-radius:8px;border:1px solid #3a3122;display:block">' +
+      '<div style="font-size:12.5px;color:#a39876;margin-top:10px;text-align:center">아이패드·아이폰에서는 이미지를 <b>길게 눌러 \'사진에 저장\'</b>할 수도 있어요.</div>',
+      [['닫기', closeModal], ['💾 이미지 저장', () => {
+        try {
+          const a = document.createElement('a'); a.href = url; a.download = fname;
+          document.body.appendChild(a); a.click(); a.remove();
+          toast('기보 이미지를 저장했어요', true);
+        } catch (e) { toast('저장이 안 되면 이미지를 길게 눌러 저장하세요'); }
+      }, true]], false, true);
+    modal.style.width = '760px';
+  }
+
   /* =========================================================
      온라인 대전 (PeerJS · 브라우저끼리 직접 연결)
      ========================================================= */
@@ -1499,19 +1611,25 @@ function mountGreatKingdom(root) {
   const lsGet = k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } };
   const esc = t => String(t || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-  function loadPeerLib() {
+  const MQTT_SRC = ['https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js', 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js'];
+  const RELAY_BROKERS = () => window.GK_RELAY_BROKERS || ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+  const RELAY_BASE = 'gk-kingdom-v1/';
+  function loadScript(srcs, test) {
     return new Promise((res, rej) => {
-      if (window.Peer) return res();
+      if (test()) return res();
       let k = 0;
       const next = () => {
-        if (k >= PEER_SRC.length) return rej(new Error('PeerJS를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.'));
+        if (k >= srcs.length) return rej(new Error('load'));
         const sc = document.createElement('script');
-        sc.src = PEER_SRC[k++]; sc.onload = () => res(); sc.onerror = () => { sc.remove(); next(); };
+        sc.src = srcs[k++]; sc.onload = () => (test() ? res() : next()); sc.onerror = () => { sc.remove(); next(); };
         document.head.appendChild(sc);
       };
       next();
     });
   }
+  const loadPeerLib = () => loadScript(PEER_SRC, () => !!window.Peer);
+  const loadMqttLib = () => loadScript(MQTT_SRC, () => !!window.mqtt);
+  const rid = () => Math.random().toString(36).slice(2, 10);
   const peerOpts = () => Object.assign({ debug: 0 }, window.GK_PEER_CONFIG || {});
   const newCode = () => { let c = ''; for (let k = 0; k < 4; k++) c += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]; return c; };
   const inviteLink = code => { try { return location.origin + location.pathname + '?room=' + code; } catch (e) { return ''; } };
@@ -1519,7 +1637,8 @@ function mountGreatKingdom(root) {
   function netSend(msg) { if (net && net.conn && net.conn.open) { try { net.conn.send(msg); } catch (e) {} } }
   function saveSession() {
     if (!net || !net.started) return;
-    lsSet('gkOnline', JSON.stringify({ role: net.role, code: net.code, myColor: net.myColor, myName: net.myName, oppName: net.oppName, v: net.v, game: net.game, moves: S.moves }));
+    lsSet('gkOnline', JSON.stringify({ role: net.role, code: net.code, sid: net.sid, guestSid: net.guestSid, myColor: net.myColor, myName: net.myName,
+      oppName: net.oppName, v: net.v, game: net.game, moves: S.moves }));
   }
   function sendState() {
     if (!net) return;
@@ -1544,13 +1663,17 @@ function mountGreatKingdom(root) {
     if (S.over) setTimeout(showResult, 300);
   }
 
+  function useConn(c) {
+    if (net.conn && net.conn !== c) { const old = net.conn; net.conn = null; try { old.close(); } catch (e) {} }
+    net.conn = c; net.connected = true; net.via = c.relay ? 'relay' : 'p2p'; clearTimeout(net.joinTimer); render();
+  }
   function attachConn(c) {
     c.on('open', () => {
-      if (!net) { c.close(); return; }
-      if (net.conn && net.conn !== c && net.conn.open) { try { c.send({ type: 'full' }); } catch (e) {} setTimeout(() => c.close(), 400); return; }
-      net.conn = c; net.connected = true; clearTimeout(net.joinTimer);
-      netSend({ type: 'hello', name: net.myName, ver: 1, role: net.role });
-      render();
+      if (!net) { try { c.close(); } catch (e) {} return; }
+      if (net.role !== 'guest') return;            // 방장은 hello를 받으면 연결을 확정
+      if (net.conn && net.conn.open && net.conn !== c) { try { c.close(); } catch (e) {} return; }
+      useConn(c);
+      netSend({ type: 'hello', name: net.myName, ver: 2, sid: net.sid });
     });
     c.on('data', d => onNetMsg(c, d));
     c.on('close', () => onConnLost(c));
@@ -1576,8 +1699,15 @@ function mountGreatKingdom(root) {
 
   function onNetMsg(c, m) {
     if (!net || !m || typeof m !== 'object') return;
-    if (m.type === 'full') { leaveOnline(); openOnline(null, '이 방은 이미 두 명이 대국 중이에요.'); return; }
+    if (net.role === 'host' && m.type === 'hello' && c !== net.conn) {
+      if (net.conn && net.conn.open && net.guestSid && m.sid !== net.guestSid) {
+        try { c.send({ type: 'full' }); } catch (e) {}
+        setTimeout(() => { try { c.close(); } catch (e) {} }, 600); return;
+      }
+      useConn(c); net.guestSid = m.sid;
+    }
     if (c !== net.conn) return;
+    if (m.type === 'full') { leaveOnline(); openOnline(null, '이 방은 이미 두 명이 대국 중이에요.'); return; }
     switch (m.type) {
       case 'hello':
         net.oppName = String(m.name || '').slice(0, 10);
@@ -1587,7 +1717,9 @@ function mountGreatKingdom(root) {
             startOnlineGame(net.myColor, [], 0, 1);
             toast('🎉 ' + (net.oppName || '상대') + ' 님이 들어왔어요!');
           }
+          netSend({ type: 'hello', name: net.myName, ver: 2 });
           netSend({ type: 'sync', hostColor: net.myColor, moves: S.moves, v: net.v, game: net.game });
+          saveSession();
         }
         render(); break;
       case 'sync':
@@ -1650,64 +1782,186 @@ function mountGreatKingdom(root) {
     netSend({ type: 'bye' });
     const n = net; net = null;
     clearTimeout(n.joinTimer); clearTimeout(n.rejoinTimer);
-    setTimeout(() => { try { n.conn && n.conn.close(); } catch (e) {} try { n.peer && n.peer.destroy(); } catch (e) {} }, 300);
+    setTimeout(() => {
+      try { n.conn && n.conn.close(); } catch (e) {}
+      Object.values(n.relayConns || {}).forEach(c => { try { c.close(); } catch (e) {} });
+      try { n.relayConn && n.relayConn.close(); } catch (e) {}
+      (n.mqtt || []).forEach(cl => { try { cl.end(true); } catch (e) {} });
+      try { n.peer && n.peer.destroy(); } catch (e) {}
+    }, 300);
     lsSet('gkOnline', null);
     cfg = Object.assign({}, cfg, { mode: 'ai' });
     S = gkNew(); hist = []; note = '';
     render();
   }
 
-  function openPeer(id, onReady, onFail, tries) {
+  // ── 연결 실패 판정: 직접 연결과 중계 연결이 모두 안 될 때만 ──
+  function checkFail() {
+    if (!net || net.started || net.connected) return;
+    if (net.p2pDead && net.relayDead) {
+      const role = net.role, code = net.code;
+      leaveOnline();
+      openOnline(role === 'guest' ? code : null, '온라인 연결 서버에 접속하지 못했어요. 인터넷 연결이나 학교 방화벽을 확인해 주세요.');
+    }
+  }
+  function onTransportReady() { if (net && net.role === 'host' && !net.started) showWaiting(); else render(); }
+
+  // ── 직접 연결 (PeerJS / WebRTC) ──
+  function openPeer(id, onReady, tries) {
     const peer = id ? new window.Peer(id, peerOpts()) : new window.Peer(peerOpts());
     net.peer = peer;
-    peer.on('open', () => onReady(peer));
+    peer.on('open', () => { if (net && net.peer === peer) { net.p2pReady = true; onReady(peer); } });
     peer.on('connection', c => { if (net && net.role === 'host') attachConn(c); });
     peer.on('disconnected', () => { if (net && net.peer === peer && !peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch (e) {} }, 1500); });
     peer.on('error', err => {
       const t = err && err.type;
-      if (t === 'unavailable-id' && (tries || 0) < 12) {
+      if (!net || net.peer !== peer) return;
+      if (t === 'unavailable-id') {
         try { peer.destroy(); } catch (e) {}
-        if (!net) return;
-        if (net.resuming) setTimeout(() => { if (net) openPeer(id, onReady, onFail, (tries || 0) + 1); }, 3000);
-        else { net.code = newCode(); openPeer(PEER_PREFIX + net.code, onReady, onFail, (tries || 0) + 1); }
+        if ((tries || 0) >= 12) { net.p2pDead = true; checkFail(); return; }
+        if (net.resuming || net.relayStarted) setTimeout(() => { if (net) openPeer(id, onReady, (tries || 0) + 1); }, 3000);
+        else { net.code = newCode(); openPeer(PEER_PREFIX + net.code, onReady, (tries || 0) + 1); }
         return;
       }
-      if (t === 'peer-unavailable') { if (net && net.role === 'guest' && !net.started) onFail('방 <b>' + esc(net.code) + '</b>을(를) 찾을 수 없어요. 코드를 확인해 주세요.'); return; }
-      if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') { if (net && !net.started) onFail('연결 서버에 접속하지 못했어요. 잠시 후 다시 시도해 주세요.'); return; }
-      if (t === 'browser-incompatible') onFail('이 브라우저는 온라인 대전을 지원하지 않아요.');
+      if (t === 'peer-unavailable') return;           // 상대가 직접 연결에 없음 → 중계 연결로 시도 중
+      if (!net.p2pReady) { net.p2pDead = true; if (net.role === 'host') startRelayHost(); checkFail(); }
     });
+  }
+  function connectP2P() {
+    if (!net || !net.peer || net.peer.destroyed || !net.peer.open) return;
+    attachConn(net.peer.connect(PEER_PREFIX + net.code, { reliable: true }));
+  }
+
+  // ── 중계 연결 (MQTT 공개 서버) : 직접 연결이 막힌 네트워크용 ──
+  function makeRelayConn(client, pubTopic, from) {
+    const ev = {};
+    const c = {
+      open: false, closed: false, relay: true, client, last: Date.now(),
+      on(t, f) { (ev[t] = ev[t] || []).push(f); },
+      emit(t, a) { (ev[t] || []).slice().forEach(f => { try { f(a); } catch (e) { console.error(e); } }); },
+      raw(o) { try { client.publish(pubTopic, JSON.stringify(from ? Object.assign({ from }, o) : o)); } catch (e) {} },
+      send(o) { if (c.open) c.raw(o); },
+      close() { if (c.closed) return; c.raw({ type: '_close' }); c.closed = true; c.open = false; clearInterval(c.hb); clearInterval(c.watch); c.emit('close'); },
+      start() {
+        c.open = true; c.last = Date.now();
+        c.hb = setInterval(() => c.raw({ type: '_ping' }), 4000);
+        c.watch = setInterval(() => { if (Date.now() - c.last > 15000) c.close(); }, 2000);
+        c.emit('open');
+      },
+      recv(o) {
+        c.last = Date.now();
+        if (o.type === '_ping' || o.type === '_knock' || o.type === '_ack') return;
+        if (o.type === '_close') { c.close(); return; }
+        c.emit('data', o);
+      }
+    };
+    return c;
+  }
+  function mqttConnect(url, prefix) {
+    return window.mqtt.connect(url, { clientId: prefix + rid(), clean: true, connectTimeout: 8000, reconnectPeriod: 4000, keepalive: 30 });
+  }
+  function watchRelayFail(urls) {
+    setTimeout(() => {
+      if (!net || net.relayReady) return;
+      net.relayDead = true; checkFail();
+    }, 10000);
+  }
+
+  async function startRelayHost() {
+    if (!net || net.relayStarted) return;
+    net.relayStarted = true;
+    try { await loadMqttLib(); } catch (e) { if (net) { net.relayDead = true; checkFail(); } return; }
+    if (!net) return;
+    const base = RELAY_BASE + net.code + '/', urls = RELAY_BROKERS();
+    net.relayConns = {}; net.mqtt = [];
+    urls.forEach(url => {
+      let cl;
+      try { cl = mqttConnect(url, 'gkh'); } catch (e) { return; }
+      net.mqtt.push(cl);
+      cl.on('error', () => {});
+      cl.on('connect', () => { cl.subscribe(base + 'h'); if (net && !net.relayReady) { net.relayReady = true; onTransportReady(); } });
+      cl.on('message', (t, buf) => {
+        if (!net) return;
+        let o; try { o = JSON.parse(buf.toString()); } catch (e) { return; }
+        if (!o || !o.from) return;
+        let c = net.relayConns[o.from];
+        if (o.type === '_knock') {
+          if (!c || c.closed) { c = makeRelayConn(cl, base + 'g/' + o.from); net.relayConns[o.from] = c; attachConn(c); c.start(); }
+          c.raw({ type: '_ack' }); return;
+        }
+        if (c && !c.closed && c.client === cl) c.recv(o);
+      });
+    });
+    watchRelayFail(urls);
+  }
+
+  async function startRelayGuest() {
+    if (!net || net.relayStarted) return;
+    net.relayStarted = true;
+    try { await loadMqttLib(); } catch (e) { if (net) { net.relayDead = true; checkFail(); } return; }
+    if (!net) return;
+    const base = RELAY_BASE + net.code + '/', urls = RELAY_BROKERS();
+    net.mqtt = [];
+    urls.forEach(url => {
+      let cl;
+      try { cl = mqttConnect(url, 'gkg'); } catch (e) { return; }
+      net.mqtt.push(cl);
+      cl.knock = () => { if (net && !(net.conn && net.conn.open)) { try { cl.publish(base + 'h', JSON.stringify({ type: '_knock', from: net.sid })); } catch (e) {} } };
+      cl.on('error', () => {});
+      cl.on('connect', () => { if (!net) return; net.relayReady = true; cl.subscribe(base + 'g/' + net.sid, () => cl.knock()); });
+      cl.on('message', (t, buf) => {
+        if (!net) return;
+        let o; try { o = JSON.parse(buf.toString()); } catch (e) { return; }
+        if (!o) return;
+        if (o.type === '_ack') {
+          if ((net.relayConn && !net.relayConn.closed) || (net.conn && net.conn.open)) return;
+          const c = makeRelayConn(cl, base + 'h', net.sid);
+          net.relayConn = c; attachConn(c); c.start(); return;
+        }
+        if (net.relayConn && !net.relayConn.closed && net.relayConn.client === cl) net.relayConn.recv(o);
+      });
+    });
+    watchRelayFail(urls);
   }
 
   function connectToHost() {
-    if (!net || !net.peer || net.peer.destroyed) return;
-    const c = net.peer.connect(PEER_PREFIX + net.code, { reliable: true });
-    attachConn(c);
+    if (!net) return;
+    net.tick = (net.tick || 0) + 1;
+    if (net.tick % 3 === 1) connectP2P();
+    (net.mqtt || []).forEach(cl => { if (cl.connected && cl.knock) cl.knock(); });
   }
 
   async function hostRoom(colorPick, resume) {
-    try { await loadPeerLib(); } catch (e) { openOnline(null, e.message); return; }
     const myColor = colorPick === 0 ? (Math.random() < 0.5 ? 1 : 2) : colorPick;
     net = { role: 'host', code: resume ? resume.code : newCode(), myName, oppName: resume ? resume.oppName : '', myColor: resume ? resume.myColor : myColor,
-      v: resume ? resume.v : 0, game: resume ? resume.game : 1, connected: false, started: false, resuming: !!resume };
+      v: resume ? resume.v : 0, game: resume ? resume.game : 1, connected: false, started: false, resuming: !!resume, guestSid: resume ? resume.guestSid : null };
     if (resume) { cfg = Object.assign({}, cfg, { mode: 'online' }); net.started = true; loadMoves(resume.moves); render(); }
     else showWaiting();
-    openPeer(PEER_PREFIX + net.code, () => { if (net) { net.resuming = false; if (!net.started) showWaiting(); else render(); } },
-      msg => { leaveOnline(); openOnline(null, msg); });
+    const kick = setTimeout(() => startRelayHost(), 4000);   // 직접 연결 서버가 느리면 중계도 바로 준비
+    let ok = true;
+    try { await loadPeerLib(); } catch (e) { ok = false; }
+    if (!net) return;
+    if (!ok) { net.p2pDead = true; clearTimeout(kick); startRelayHost(); return; }
+    openPeer(PEER_PREFIX + net.code, () => { if (!net) return; net.resuming = false; clearTimeout(kick); startRelayHost(); onTransportReady(); });
   }
 
   async function joinRoom(code, resume) {
-    try { await loadPeerLib(); } catch (e) { openOnline(code, e.message); return; }
-    net = { role: 'guest', code, myName, oppName: resume ? resume.oppName : '', myColor: resume ? resume.myColor : 0,
+    net = { role: 'guest', code, sid: (resume && resume.sid) || rid(), myName, oppName: resume ? resume.oppName : '', myColor: resume ? resume.myColor : 0,
       v: resume ? resume.v : 0, game: resume ? resume.game : 1, connected: false, started: false };
     if (resume) { cfg = Object.assign({}, cfg, { mode: 'online' }); net.started = true; loadMoves(resume.moves); render(); }
-    else openModal('<div style="text-align:center;font-size:36px">🔗</div><div style="text-align:center;font-size:16px;color:#efe6cf;margin-top:6px">방 <b style="color:#f3d98b;letter-spacing:2px">' + esc(code) +
-      '</b>에 연결하는 중…</div>', [['취소', () => { leaveOnline(); openOnline(); }]]);
-    const fail = msg => { if (!net || net.started) return; const c = net.code; leaveOnline(); openOnline(c, msg); };
-    openPeer(null, () => {
-      connectToHost();
-      if (!resume) net.joinTimer = setTimeout(() => { if (net && !net.connected) fail('방 <b>' + esc(code) + '</b>에 연결하지 못했어요. 코드를 확인하거나 잠시 후 다시 시도해 주세요.'); }, 12000);
-      else scheduleRejoin();
-    }, fail);
+    else {
+      openModal('<div style="text-align:center;font-size:36px">🔗</div><div style="text-align:center;font-size:16px;color:#efe6cf;margin-top:6px">방 <b style="color:#f3d98b;letter-spacing:2px">' + esc(code) +
+        '</b>에 연결하는 중…</div><div style="text-align:center;font-size:12.5px;color:#a39876;margin-top:8px">직접 연결이 안 되면 중계 서버로 연결해요. 최대 15초쯤 걸릴 수 있어요.</div>',
+        [['취소', () => { leaveOnline(); openOnline(); }]]);
+      net.joinTimer = setTimeout(() => {
+        if (!net || net.connected || net.started) return;
+        const c = net.code; leaveOnline();
+        openOnline(c, '방 <b>' + esc(c) + '</b>에 연결하지 못했어요. 방 코드가 맞는지, 방장이 아직 방에 있는지 확인해 주세요.');
+      }, 16000);
+    }
+    startRelayGuest();
+    loadPeerLib().then(() => { if (net) openPeer(null, () => connectP2P()); }, () => { if (net) { net.p2pDead = true; checkFail(); } });
+    scheduleRejoin();
   }
 
   function showWaiting() {
@@ -1718,7 +1972,7 @@ function mountGreatKingdom(root) {
       '<div style="text-align:center;font-family:' + SERIF + ';font-size:52px;letter-spacing:14px;color:#f3d98b;text-shadow:0 2px 16px rgba(212,175,55,.45);padding-left:14px">' + net.code + '</div>' +
       '<div style="text-align:center;font-size:13.5px;color:#d9cfb5;margin-top:8px">나는 <b style="color:' + nameColor(net.myColor) + '">' + GK_NAME[net.myColor] + '</b>' + (net.myColor === 1 ? ' (선공)' : ' (후공)') + '</div>' +
       (link ? '<div style="margin-top:14px;background:#14110c;border:1px solid #3a3122;border-radius:8px;padding:8px 10px;font-size:12px;color:#a39876;word-break:break-all;text-align:center">' + esc(link) + '</div>' : '') +
-      '<div style="text-align:center;margin-top:14px;font-size:14px;color:#f3d98b;animation:gkBlink 1.4s ease-in-out infinite">' + (net.peer && net.peer.open ? '상대를 기다리는 중…' : '방을 여는 중…') + '</div>',
+      '<div style="text-align:center;margin-top:14px;font-size:14px;color:#f3d98b;animation:gkBlink 1.4s ease-in-out infinite">' + ((net.peer && net.peer.open) || net.relayReady ? '상대를 기다리는 중…' : '방을 여는 중…') + '</div>',
       [['나가기', () => { leaveOnline(); closeModal(); }], ['🔗 초대 링크 복사', () => {
         try { navigator.clipboard.writeText(link).then(() => toast('링크를 복사했어요', true)); } catch (e) { toast('복사가 안 되면 링크를 직접 알려 주세요'); }
       }, true]]);
