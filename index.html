@@ -331,7 +331,7 @@ function aiChooseMove(S, me, level) {
     if (((sc[1] - sc[2] >= 3) ? GK_BLUE : GK_ORANGE) === me) return -1; // 지금 끝내면 이김 → 패스
   }
   let m;
-  if (level === 'hard' || level === 'master') m = srBestMove(b, me, AI_LEVELS[level]);
+  if (level === 'hard' || level === 'master') m = srChoose(b, me, AI_LEVELS[level]);
   else m = (level === 'easy' ? aiEasy2 : aiHard)(b, me);
   if (!m) return -1;
   if (S.moves.length > 20 && (m.v == null || m.v > -500)) {
@@ -374,6 +374,21 @@ function srThreats(b, p, owner) {
   return res;
 }
 
+// 영토에 닿아 있지 않은(파괴 가능한) 상대 무리 중 숨구멍이 3개인 무리의 숨구멍 → 몰아붙이기 수
+function srSqueezeMoves(b, p, owner) {
+  const opp = 3 - p, res = new Set(), seen = new Uint8Array(81);
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== opp || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const s of g.stones) seen[s] = 1;
+    if (g.libs.size !== 3) continue;
+    let immortal = false;
+    for (const L of g.libs) if (owner[L] === opp) { immortal = true; break; }
+    if (immortal) continue;
+    for (const L of g.libs) if (owner[L] === 0) res.add(L);
+  }
+  return [...res];
+}
 // p가 두면 상대 무리를 단수(숨구멍 1개)로 만드는 칸
 function srAtariMoves(b, p, owner) {
   const opp = 3 - p, res = new Set(), seen = new Uint8Array(81);
@@ -415,6 +430,7 @@ function srSearch(b, p, depth, alpha, beta, ply, ctx) {
       if (depth <= -ctx.qdepth || standPat >= beta) return standPat;
       if (standPat > alpha) alpha = standPat;
       moves = srAtariMoves(b, p, owner).slice(0, 5);
+      if (depth > -ctx.sqDepth) for (const m of srSqueezeMoves(b, p, owner).slice(0, 4)) if (!moves.includes(m)) moves.push(m);
     } else {
       if (depth <= -ctx.qdepth) return aiEval(b, p) - 3;
       moves = [...threats];
@@ -447,6 +463,7 @@ function srSearch(b, p, depth, alpha, beta, ply, ctx) {
   let best = standPat != null ? standPat : -Infinity;
   for (const k of kids) {
     const v = -srSearch(k.nb, 3 - p, depth - 1, -beta, -alpha, ply + 1, ctx);
+    if (ply === 0) ctx.rootScores[k.i] = v;
     if (v > best) { best = v; if (ply === 0) ctx.bestMove = k.i; }
     if (v > alpha) alpha = v;
     if (alpha >= beta) break;
@@ -461,14 +478,14 @@ function srBestMove(b, p, opt) {
   if (win >= 0) return { i: win, v: AI_WIN };
   let result = null;
   const ctx = {
-    deadline: Date.now() + opt.timeMs, nodes: 0, qdepth: opt.qdepth,
+    deadline: Date.now() + opt.timeMs, nodes: 0, qdepth: opt.qdepth, sqDepth: opt.sqDepth || 0,
     width: opt.width, rootWidth: opt.rootWidth, bestMove: -1
   };
   for (let d = 1; d <= opt.maxDepth; d++) {
-    ctx.bestMove = -1;
+    ctx.bestMove = -1; ctx.rootScores = {};
     try {
       const v = srSearch(b, p, d, -Infinity, Infinity, 0, ctx);
-      if (ctx.bestMove >= 0) result = { i: ctx.bestMove, v, depth: d };
+      if (ctx.bestMove >= 0) result = { i: ctx.bestMove, v, depth: d, scores: ctx.rootScores };
       if (v >= AI_WIN - 50 || v <= -(AI_WIN - 50)) break; // 승패가 보이면 그만
     } catch (e) {
       if (e !== ctx) throw e;
@@ -478,10 +495,151 @@ function srBestMove(b, p, opt) {
   return result;
 }
 
+// 수읽기 + 사활 확인: 강제로 잡는 수가 있으면 두고, 내 무리가 잡히는 수는 피한다
+function srChoose(b, p, opt) {
+  const res = srBestMove(b, p, opt);
+  if (!opt.lifeMs || (res && res.v >= AI_WIN - 50)) return res;
+  const kill = lkFindKill(b, p, opt.lifeMs * 0.5, opt.lifeN);
+  if (kill >= 0) return { i: kill, v: AI_WIN - 10, kill: true };
+  if (!res) return res;
+  const order = Object.entries(res.scores || {}).map(([i, v]) => ({ i: +i, v })).sort((x, y) => y.v - x.v);
+  if (!order.some(o => o.i === res.i)) order.unshift({ i: res.i, v: res.v });
+  const until = Date.now() + opt.lifeMs * 0.5;
+  for (const o of order.slice(0, 8)) {
+    if (Date.now() > until) break;
+    if (!lkUnsafe(b, o.i, p, Math.max(80, (until - Date.now()) / 3), opt.safeN)) return Object.assign({}, res, { i: o.i, v: o.v, checked: o.i !== res.i });
+  }
+  // 상위 후보가 모두 위험하면: 약한 내 무리 주변(숨구멍·그 옆)에서 안전한 수를 찾는다
+  const owner = gkTerritory(b), seen = new Uint8Array(81), def = new Set();
+  for (let i = 0; i < 81; i++) {
+    if (b[i] !== p || seen[i]) continue;
+    const g = gkGroup(b, i);
+    for (const st of g.stones) seen[st] = 1;
+    if (g.libs.size <= 3 && !lkImmortal(g, owner, p)) for (const c of lkCands(b, g, owner, p)) def.add(c);
+  }
+  let pick = null;
+  const until2 = Date.now() + opt.lifeMs * 0.5;
+  for (const c of def) {
+    if (Date.now() > until2) break;
+    const r = aiApply(b, c, p);
+    if (r.kind === 'suicide') continue;
+    if (lkUnsafe(b, c, p, 150, opt.safeN)) continue;
+    const v = aiEval(r.nb, p);
+    if (!pick || v > pick.v) pick = { i: c, v };
+  }
+  if (pick) return Object.assign({}, res, { i: pick.i, v: pick.v, checked: true, rescue: true });
+  return res;
+}
+
 const AI_LEVELS = {
-  hard:   { maxDepth: 4, width: 8,  rootWidth: 14, qdepth: 6, timeMs: 1200 },
-  master: { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 6, timeMs: 2500 }
+  hard:   { maxDepth: 4, width: 8,  rootWidth: 14, qdepth: 6, sqDepth: 2, timeMs: 1000, lifeMs: 600,  lifeN: 3, safeN: 2 },
+  master: { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 8, sqDepth: 3, timeMs: 2000, lifeMs: 1400, lifeN: 4, safeN: 3 }
 };
+
+/* ---------- 사활 판단: 무리를 끝까지 몰아 잡을 수 있는가 ---------- */
+// 이 게임은 '영토에 닿으면 불사', '하나라도 파괴되면 즉시 패배'이므로
+// 숨구멍 3개 이하 무리의 생사를 따로 깊이 읽는다.
+function lkCands(b, g, owner, mover) {
+  const foe = 3 - mover, set = new Set();
+  const ok = c => b[c] === GK_EMPTY && owner[c] !== foe;
+  for (const L of g.libs) {
+    if (ok(L)) set.add(L);
+    for (const k of gkNbrs(L)) if (ok(k)) set.add(k);
+  }
+  return [...set];
+}
+// 수비 후보: 숨구멍과 그 옆 + 무리 주변 2칸 + 무리에 붙은 공격 무리의 숨구멍(역공)
+function lkDefCands(b, g, owner, d, a) {
+  const set = new Set(lkCands(b, g, owner, d));
+  const ok = c => b[c] === GK_EMPTY && owner[c] !== a;
+  const seenA = new Set();
+  for (const s of g.stones) {
+    const r = (s / 9) | 0, c = s % 9;
+    for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) {
+      if (Math.abs(dr) + Math.abs(dc) > 2) continue;
+      const rr = r + dr, cc = c + dc; if (rr < 0 || rr > 8 || cc < 0 || cc > 8) continue;
+      const k = rr * 9 + cc; if (ok(k)) set.add(k);
+    }
+    for (const k of gkNbrs(s)) if (b[k] === a && !seenA.has(k)) {
+      const ag = gkGroup(b, k); ag.stones.forEach(x => seenA.add(x));
+      if (ag.libs.size <= 2) for (const L of ag.libs) if (ok(L)) set.add(L);
+    }
+  }
+  return [...set];
+}
+function lkImmortal(g, owner, color) { for (const L of g.libs) if (owner[L] === color) return true; return false; }
+
+// 공격 a 차례: 무리(t 포함)를 n수 안에 파괴할 수 있으면 첫 수(또는 -2: 이미 단수), 없으면 -1
+function lkKill(b, t, a, n, ctx) {
+  if ((++ctx.nodes & 127) === 0 && Date.now() > ctx.deadline) throw ctx;
+  const key = 'A' + n + t + b.join('');
+  if (ctx.memo.has(key)) return ctx.memo.get(key);
+  const d = 3 - a, owner = gkTerritory(b);
+  let res = -1;
+  if (srCanWin(b, a, owner) >= 0) res = srCanWin(b, a, owner);
+  else {
+    const g = gkGroup(b, t);
+    if (!lkImmortal(g, owner, d) && n > 1 && g.libs.size <= 4) {
+      for (const m of lkCands(b, g, owner, a)) {
+        const r = aiApply(b, m, a);
+        if (r.kind === 'suicide') continue;
+        if (r.kind === 'capture') { res = m; break; }
+        if (!lkLive(r.nb, t, a, n - 1, ctx)) { res = m; break; }
+      }
+    }
+  }
+  ctx.memo.set(key, res);
+  return res;
+}
+// 수비 차례: 살 수 있으면 true
+function lkLive(b, t, a, n, ctx) {
+  const key = 'D' + n + t + b.join('');
+  if (ctx.memo.has(key)) return ctx.memo.get(key);
+  const d = 3 - a, owner = gkTerritory(b);
+  let res = false;
+  if (srCanWin(b, d, owner) >= 0) res = true;
+  else {
+    const g = gkGroup(b, t);
+    if (lkImmortal(g, owner, d) || g.libs.size >= 5) res = true;
+    else {
+      const th = srThreats(b, d, owner);
+      const cands = th.size ? [...th] : lkDefCands(b, g, owner, d, a);
+      for (const m of cands) {
+        const r = aiApply(b, m, d);
+        if (r.kind === 'capture') { res = true; break; }
+        if (r.kind === 'suicide') continue;
+        if (lkKill(r.nb, t, a, n, ctx) < 0) { res = true; break; }
+      }
+      if (!res && !th.size && lkKill(b, t, a, n, ctx) < 0) res = true;   // 손 빼기(다른 곳에 두기)
+    }
+  }
+  ctx.memo.set(key, res);
+  return res;
+}
+
+// me가 강제로 상대 무리를 잡는 첫 수 (없으면 -1)
+function lkFindKill(b, me, ms, n) {
+  const ctx = { deadline: Date.now() + ms, nodes: 0, memo: new Map() };
+  const owner = gkTerritory(b), opp = 3 - me, seen = new Uint8Array(81);
+  try {
+    for (let i = 0; i < 81; i++) {
+      if (b[i] !== opp || seen[i]) continue;
+      const g = gkGroup(b, i);
+      for (const s of g.stones) seen[s] = 1;
+      if (g.libs.size > 3 || lkImmortal(g, owner, opp)) continue;
+      const m = lkKill(b, i, me, n, ctx);
+      if (m >= 0) return m;
+    }
+  } catch (e) { if (e !== ctx) throw e; }
+  return -1;
+}
+// me가 i에 둔 뒤 상대가 내 무리를 강제로 잡을 수 있는가 (true = 위험)
+function lkUnsafe(b, i, me, ms, n) {
+  const r = aiApply(b, i, me);
+  if (r.kind === 'capture') return false;
+  if (r.kind === 'suicide') return true;
+  return lkFindKill(r.nb, 3 - me, ms, n) >= 0;
+}
 
 /* =========================================================
    GREAT KINGDOM — 연습모드 (문제 판정 + 스테이지)
@@ -546,6 +704,32 @@ function pzDefenderReply(b, d, p, n) {
   }
   const m = srBestMove(b, d, { maxDepth: 3, width: 8, rootWidth: 12, qdepth: 4, timeMs: 600 });
   return m ? m.i : -1;
+}
+
+// '잡기' 문제의 수비 AI: 대상 무리가 가장 오래 사는 수
+function pzKillReply(b, t, n) {
+  const owner = gkTerritory(b);
+  const w = srCanWin(b, 2, owner);
+  if (w >= 0) return w;
+  const ctx = { deadline: Date.now() + 1500, nodes: 0, memo: new Map() };
+  const g = gkGroup(b, t), th = srThreats(b, 2, owner);
+  const cands = th.size ? [...th] : lkDefCands(b, g, owner, 2, 1);
+  let fallback = -1, best = -1;
+  try {
+    for (const m of cands) {
+      const r = aiApply(b, m, 2);
+      if (r.kind === 'capture') return m;
+      if (r.kind === 'suicide') continue;
+      const libs = gkGroup(r.nb, t).libs.size;
+      if (libs > best) { best = libs; fallback = m; }
+      if (lkKill(r.nb, t, 1, n, ctx) < 0) return m;
+    }
+  } catch (e) { if (e !== ctx) throw e; }
+  return fallback;
+}
+function pzKillHint(b, t, n) {
+  const ctx = { deadline: Date.now() + 2000, nodes: 0, memo: new Map() };
+  try { return lkKill(b, t, 1, n, ctx); } catch (e) { return -1; }
 }
 
 function pzBoard(rows) {
@@ -685,6 +869,27 @@ const PZ_STAGES = [
     task: '파랑은 왼쪽 위 2칸, 주황은 오른쪽 위 6칸을 노리고 있어요. 한 수씩 둔 뒤 <b>파랑 영토가 주황보다 적지 않게</b> 하세요.',
     tip: '내 영토 2칸을 완성하면 주황이 6칸을 완성해요. 상대의 큰 곳을 먼저 깨는 게 이득! 그리고 입구(H3)보다 <b>안쪽</b>에 들어가야 확실히 깨져요.',
     rows: ['.....O...', 'BB...O...', '......O.O', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  // ── 6장. 불사 기지 ──
+  { ch: 6, title: '성 3개로 불사 기지', goal: { type: 'territory', target: 1, moves: 1 }, hint: 'C5',
+    lesson: '내 <b>영토에 맞닿은 성</b>은 절대 파괴되지 않아요. 상대는 내 영토에 성을 놓을 수 없어서, 그 숨구멍은 영원히 막히지 않거든요. 이런 성을 <b>불사</b>라고 불러요.',
+    task: '중립 성 옆에 성 하나를 더 놓아 <b>영토 1칸</b>을 만드세요. 그러면 둘러싼 성들이 모두 불사가 돼요.',
+    tip: 'D4·D6·C5는 이제 불사! 이 기지에 이어 붙인 성도 모두 불사가 돼요. 중립 성 옆은 성 3개로 기지를 만들 수 있는 명당이에요.',
+    rows: ['.........', '.........', '..O......', '...B.....', '....+....', '...B.....', '..O......', '.........', '.........'] },
+  { ch: 6, title: '달아나지 말고 영토를', goal: { type: 'save', depth: 4 }, hint: 'A2',
+    lesson: '공격받은 성을 살리는 방법은 달아나기만 있는 게 아니에요. <b>성 옆에 영토를 만들면</b> 그 성은 불사가 되어 살아나요.',
+    task: 'B1의 파랑 성이 공격받고 있어요(숨구멍 A1 하나). 살리세요!',
+    tip: 'A1로 달아나면 숨구멍이 늘지 않아 결국 잡혀요. A2를 두면 A1이 파랑 영토가 되어 B1이 불사가 됩니다. 이 게임은 영토 한 칸만 있어도 살아요!',
+    rows: ['.BO......', '.O.......', '.........', '.........', '....+....', '.........', '.........', '.........', '.........'] },
+  { ch: 6, title: '영토 자리부터 빼앗기', goal: { type: 'kill', target: 'B2', moves: 3 }, hint: 'A2',
+    lesson: '<b>실전 장면</b> — 선생님이 고수를 이긴 대국이에요. 구석에 갇힌 무리는 영토를 만들어야만 살 수 있어요. 그러니 <b>영토가 될 자리를 먼저 빼앗으면</b> 잡을 수 있어요.',
+    task: '주황 B2·C2 무리는 파괴되지 않는 파랑 벽과 구석 사이에 갇혀 있어요. <b>3수 안에</b> 파괴하세요.',
+    tip: '실제 대국에서는 A3로 시작해 4수 만에 잡았는데, A2부터 두면 3수면 충분해요. 숨구멍이면서 영토가 될 자리인 곳이 급소예요.',
+    rows: ['...BBO...', '.OOBOO...', '.BBBOBO..', '.O.B.B.O.', '..B.+.B.O', '...B.B...', '..O.B.O..', '..O...O..', '.........'] },
+  { ch: 6, title: '불사 벽으로 몰아 잡기', goal: { type: 'kill', target: 'G5', moves: 4 }, hint: 'H6',
+    lesson: '<b>실전 장면</b> — 선생님이 고수를 이긴 또 다른 대국이에요. 상대 무리를 <b>내 불사 벽</b>에 붙여 몰면, 상대는 벽 쪽으로는 숨구멍을 얻을 수 없어요.',
+    task: '주황 G5·H5 무리의 위쪽은 파괴되지 않는 파랑 벽이에요. <b>4수 안에</b> 파괴하세요. (실제 대국의 색을 바꿔 놓았어요)',
+    tip: '넓은 아래쪽 출구부터 막으면 상대는 가장자리로 몰릴 수밖에 없어요. 출구 막기 → 가장자리로 몰기 → 마무리!',
+    rows: ['.........', '...O..O..', '..O.B.O..', '...B.BBB.', '..B.+BOO.', '.OBO.B...', '....O....', '.....O...', '.........'] },
 ];
 
 // p가 n수 안에 파괴하는 첫 수 (없으면 -1)
@@ -712,7 +917,7 @@ function mountGreatKingdom(root) {
   let S = gkNew(), hist = [], showTerr = true, hover = -1, pendingSuicide = -1, note = '';
   let cfg = { mode: 'ai', level: 'normal', human: 1 }, aiTimer = null, thinking = false;
   const LEVEL_NAME = { easy: '쉬움', normal: '보통', hard: '어려움', master: '고수' };
-  const CH_NAME = { 1: '영토 만들기', 2: '공성', 3: '방어', 4: '전술', 5: '영토 전략' };
+  const CH_NAME = { 1: '영토 만들기', 2: '공성', 3: '방어', 4: '전술', 5: '영토 전략', 6: '불사 기지' };
   let view = 'game';
   let pz = null;
   let cleared = [];
@@ -848,6 +1053,17 @@ function mountGreatKingdom(root) {
   [pzLesson, pzStatus, pzBtnRow, pzProg].forEach(e => pzPanel.appendChild(e));
   panel.appendChild(pzPanel);
 
+  /* 복기 패널 */
+  const rvPanel = h('div', { display: 'none', flexDirection: 'column', gap: '12px' });
+  const rvHead = h('div', card({ borderColor: '#8a7230' }));
+  const rvInfo = h('div', card({ fontSize: '14px', lineHeight: '1.65' }));
+  const rvNav = h('div', { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '6px' });
+  const rvKeys = h('div', card({ padding: '12px 14px' }));
+  const rvList = h('div', card({ padding: '12px 14px' }));
+  const rvBtns = h('div', { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' });
+  [rvHead, rvInfo, rvNav, rvKeys, rvList, rvBtns].forEach(e => rvPanel.appendChild(e));
+  panel.appendChild(rvPanel);
+
   function mkBtn(label, fn, primary) {
     const b = h('button', {
       background: primary ? '#3a2e14' : '#1d1912', color: primary ? '#f3d98b' : '#efe6cf',
@@ -896,6 +1112,11 @@ function mountGreatKingdom(root) {
   mkBtn('↺ 다시 하기', () => pzStart(pz.k));
   mkBtn('📋 단계 목록', () => openStageList());
   mkBtn('⚔️ 실전 대전', () => { view = 'game'; render(); openSetup(); });
+  mkBtn.target = rvNav;
+  mkBtn('⏮', () => rvGo(0)); mkBtn('◀', () => rvGo(rv.k - 1)); mkBtn('▶', () => rvGo(rv.k + 1)); mkBtn('⏭', () => rvGo(rv.n));
+  mkBtn.target = rvBtns;
+  const rvBestBtn = mkBtn('', () => { rv.showBest = !rv.showBest; render(); });
+  mkBtn('복기 끝내기', () => { view = 'game'; render(); }, true);
   mkBtn.target = null;
 
   const kifuTitle = h('div', { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' },
@@ -904,6 +1125,11 @@ function mountGreatKingdom(root) {
     fontSize: '12.5px', fontFamily: SANS, cursor: 'pointer' }, '🖼 이미지로 저장');
   kifuSaveBtn.className = 'gk-btn';
   kifuSaveBtn.addEventListener('click', () => openKifuImage());
+  const reviewBtn = h('button', { background: '#1d1912', color: '#f3d98b', border: '1px solid #8a7230', borderRadius: '7px', padding: '4px 10px',
+    fontSize: '12.5px', fontFamily: SANS, cursor: 'pointer', marginRight: '6px', marginLeft: 'auto' }, '📊 복기');
+  reviewBtn.className = 'gk-btn';
+  reviewBtn.addEventListener('click', () => startReview());
+  kifuTitle.appendChild(reviewBtn);
   kifuTitle.appendChild(kifuSaveBtn);
   const kifuList = h('div', { maxHeight: '170px', overflowY: 'auto', fontSize: '13px', lineHeight: '1.75', display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '10px' });
   kifuCard.appendChild(kifuTitle); kifuCard.appendChild(kifuList);
@@ -949,6 +1175,7 @@ function mountGreatKingdom(root) {
   /* ---------- 동작 ---------- */
   function onCell(i) {
     if (view === 'practice') { pzClick(i); return; }
+    if (view === 'review') return;
     if (S.over || aiTurn()) return;
     if (online()) {
       if (!net.connected) { note = '상대와 연결되지 않았어요. 잠시 기다려 주세요.'; render(); return; }
@@ -1116,7 +1343,9 @@ function mountGreatKingdom(root) {
     const kl = h('div', { textAlign: 'center', marginTop: '12px' });
     const kb = h('button', { background: 'transparent', border: 'none', color: '#f3d98b', fontSize: '14px', fontFamily: SANS, cursor: 'pointer', textDecoration: 'underline' }, '🖼 이 판의 기보를 이미지로 저장');
     kb.addEventListener('click', () => openKifuImage());
-    kl.appendChild(kb); modal.appendChild(kl);
+    const rb = h('button', { background: 'transparent', border: 'none', color: '#f3d98b', fontSize: '14px', fontFamily: SANS, cursor: 'pointer', textDecoration: 'underline', marginRight: '14px' }, '📊 복기 보기');
+    rb.addEventListener('click', () => { closeModal(); startReview(); });
+    kl.appendChild(rb); kl.appendChild(kb); modal.appendChild(kl);
   }
 
   function showRules() {
@@ -1139,6 +1368,11 @@ function mountGreatKingdom(root) {
 
   function onKey(e) {
     if (e.key === 'Escape') { closeModal(); return; }
+    if (view === 'review' && overlay.style.display !== 'flex') {
+      if (e.key === 'ArrowLeft') { rvGo(rv.k - 1); e.preventDefault(); }
+      else if (e.key === 'ArrowRight') { rvGo(rv.k + 1); e.preventDefault(); }
+      return;
+    }
     if (overlay.style.display === 'flex' || view !== 'game') return;
     if (e.target && (e.target.tagName === 'INPUT')) return;
     if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undo(); return; }
@@ -1156,6 +1390,8 @@ function mountGreatKingdom(root) {
     tabPz.style.borderColor = view === 'practice' ? '#d4af37' : '#3a3122';
     gamePanel.style.display = view === 'game' ? 'flex' : 'none';
     pzPanel.style.display = view === 'practice' ? 'flex' : 'none';
+    rvPanel.style.display = view === 'review' ? 'flex' : 'none';
+    if (view === 'review') { tabGame.style.background = '#3a2e14'; tabGame.style.color = '#f3d98b'; tabGame.style.borderColor = '#d4af37'; renderReview(); return; }
     if (view === 'practice') { renderPractice(); return; }
     const b = S.board, owner = gkTerritory(b), sc = gkScore(owner);
     const threatened = S.over ? new Set() : gkThreats(b, 3 - S.turn, S.stones);
@@ -1266,6 +1502,7 @@ function mountGreatKingdom(root) {
     terrBtn.innerHTML = '영토 표시 ' + (showTerr ? '<b style="color:#f3d98b">ON</b>' : '<span style="opacity:.6">OFF</span>');
 
     kifuSaveBtn.disabled = !S.moves.length;
+    reviewBtn.disabled = S.moves.length < 2;
     // 기보
     if (!S.moves.length) kifuList.innerHTML = '<div style="color:#6f6650;grid-column:1/3">아직 둔 수가 없습니다.</div>';
     else {
@@ -1369,12 +1606,12 @@ function mountGreatKingdom(root) {
       pz.msg = '좋아요! 주황은 쉬고 있어요. 한 수 더 두세요.';
       render(); return;
     }
-    if (g.type === 'capture') {
+    if (g.type === 'capture' || g.type === 'kill') {
       if (ev.kind === 'capture') { pzFinish(true); return; }
       if (pzLeft() <= 0) { pzFinish(false, g.moves + '수 안에 파괴하지 못했어요.'); return; }
       pz.busy = true; pz.msg = '🤖 주황이 막을 곳을 찾는 중…'; render();
       setTimeout(() => {
-        const j = pzDefenderReply(pz.board, 2, 1, pzLeft());
+        const j = g.type === 'kill' ? pzKillReply(pz.board, pzIdx(g.target), pzLeft()) : pzDefenderReply(pz.board, 2, 1, pzLeft());
         if (j >= 0 && pz.board[j] === GK_EMPTY) {
           const ev2 = pzPlace(j, 2);
           if (ev2.kind === 'capture') { pzFinish(false, '주황이 ' + gkCoord(j) + '에 두어 내 성을 먼저 파괴했어요.'); return; }
@@ -1391,6 +1628,7 @@ function mountGreatKingdom(root) {
     let h = -1;
     if (pz.used === 0) h = pzIdx(st.hint);
     else if (g.type === 'capture') h = pzFindWin(pz.board, 1, pzLeft());
+    else if (g.type === 'kill') h = pzKillHint(pz.board, pzIdx(g.target), pzLeft());
     else if (g.type === 'territory') {
       for (let i = 0; i < 81 && h < 0; i++) {
         if (pz.board[i] !== GK_EMPTY) continue;
@@ -1405,7 +1643,7 @@ function mountGreatKingdom(root) {
   function openStageList() {
     let html = '<div style="font-family:' + SERIF + ';color:#d4af37;font-size:22px;text-align:center;letter-spacing:3px">연습모드</div>' +
       '<div style="text-align:center;font-size:13px;color:#a39876;margin:4px 0 6px">단계를 하나씩 깨면서 그레이트 킹덤의 전략을 배워요</div>';
-    for (let ch = 1; ch <= 5; ch++) {
+    for (let ch = 1; ch <= 6; ch++) {
       html += '<div style="font-size:13px;color:#d4af37;letter-spacing:2px;margin:16px 0 7px">' + ch + '장 · ' + CH_NAME[ch] + '</div>' +
         '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:7px">';
       PZ_STAGES.forEach((st, k) => {
@@ -1467,7 +1705,7 @@ function mountGreatKingdom(root) {
 
     const sc = gkScore(owner);
     let goalLine = '';
-    if (g.type === 'capture') goalLine = g.moves === 1 ? '한 수로 해결' : '남은 수 <b style="color:#f3d98b;font-size:16px">' + Math.max(0, pzLeft()) + '</b> / ' + g.moves;
+    if (g.type === 'capture' || g.type === 'kill') goalLine = g.moves === 1 ? '한 수로 해결' : '남은 수 <b style="color:#f3d98b;font-size:16px">' + Math.max(0, pzLeft()) + '</b> / ' + g.moves;
     else if (g.type === 'territory') goalLine = '내 영토 <b style="color:#8fa8ff;font-size:16px">' + sc[1] + '</b> / ' + g.target + '칸 · 남은 수 <b style="color:#f3d98b">' + Math.max(0, pzLeft()) + '</b>';
     else goalLine = '한 수로 해결';
     pzLesson.innerHTML =
@@ -1498,6 +1736,170 @@ function mountGreatKingdom(root) {
   }
 
 
+
+
+  /* =========================================================
+     복기: 판 전체를 분석해 승부처·최선의 수 보여 주기
+     ========================================================= */
+  let rv = null;
+  const RV_OPT = { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 8, sqDepth: 2, timeMs: 380, lifeMs: 300, lifeN: 4, safeN: 3 };
+  // 이 수를 둔 뒤 상대가 강제로 이기는가
+  function rvOppWins(board, i, p) {
+    const r = aiApply(board, i, p);
+    if (r.kind === 'capture') return false;
+    if (r.kind === 'suicide') return true;
+    if (lkFindKill(r.nb, 3 - p, 250, 4) >= 0) return true;
+    const x = srBestMove(r.nb, 3 - p, Object.assign({}, RV_OPT, { timeMs: 400 }));
+    return !!(x && x.v >= AI_WIN - 50);
+  }
+  const fmtMove = m => m.i === -1 ? '패스' : m.i === -2 ? '기권' : gkCoord(m.i);
+
+  function startReview() {
+    if (S.moves.length < 2) return;
+    stopAI(); closeModal();
+    const r = gkReplay(S.moves);
+    const states = r.hist.concat([r.S]);
+    rv = { moves: S.moves.slice(), states, n: S.moves.length, k: S.moves.length, an: [], marks: [], done: false, showBest: true,
+      names: { 1: who(1), 2: who(2) }, token: Math.random(), verified: {} };
+    view = 'review'; render();
+    const token = rv.token;
+    let p = 0;
+    const step = () => {
+      if (!rv || rv.token !== token) return;
+      if (p >= rv.n) {
+        // 2단계: '결정적 실수' 후보 검증 — 추천 수를 뒀다면 정말 버틸 수 있었나?
+        classify();
+        const cand = rv.marks.map((mk, k) => mk === '??' ? k : -1).filter(k => k >= 0 && rv.verified[k] === undefined);
+        if (cand.length) {
+          const k = cand[0], a = rv.an[k], mv = rv.moves[k], st0 = rv.states[k];
+          rv.verified[k] = (a.best >= 0 && a.best !== mv.i) ? !rvOppWins(st0.board, a.best, mv.p) : false;
+          render(); setTimeout(step, 0); return;
+        }
+        rv.done = true; classify(); render(); return;
+      }
+      const st = rv.states[p];
+      let a = { status: 'normal', best: -1, v: 0 };
+      if (!st.over) {
+        const kill = lkFindKill(st.board, st.turn, 160, 4);
+        const res = kill >= 0 ? null : srChoose(st.board, st.turn, RV_OPT);
+        if (kill >= 0) a = { status: 'win', best: kill, v: AI_WIN };
+        else if (res) a = { status: res.v >= AI_WIN - 50 ? 'win' : res.v <= -(AI_WIN - 50) ? 'loss' : 'normal', best: res.i, v: res.v };
+      }
+      rv.an[p] = a; p++;
+      classify(); render();
+      setTimeout(step, 0);
+    };
+    setTimeout(step, 30);
+  }
+
+  // 수마다 판정: '??' 결정적 실수, '?' 승리를 놓침, '!' 승리를 굳힌 수
+  function classify() {
+    const m = [];
+    for (let k = 0; k < rv.n; k++) {
+      const pre = rv.an[k], post = rv.an[k + 1], nextS = rv.states[k + 1];
+      if (!pre) { m[k] = null; continue; }
+      const mv = rv.moves[k];
+      let mark = '';
+      const capturedWin = nextS && nextS.over && nextS.over.winner === mv.p && nextS.over.reason !== 'count';
+      if (capturedWin) mark = '!';
+      else if (post || (nextS && nextS.over)) {
+        const postStatus = post ? post.status : 'normal';
+        if (pre.status !== 'loss' && postStatus === 'win') mark = '??';
+        else if (pre.status === 'win' && postStatus !== 'loss') mark = '?';
+        else if (pre.status === 'win' && postStatus === 'loss') mark = '!';
+      }
+      if (mv.i === -2) mark = pre.status === 'loss' ? '' : '??';
+      // '승리를 놓침'이라도 다음 내 차례에 여전히 이기는 흐름이면 표시하지 않음
+      if (mark === '?' && rv.an[k + 2] && rv.an[k + 2].status === 'win') mark = '!';
+      // '결정적 실수'는 추천 수가 실제로 버티는 경우에만 (검증 실패 시 이미 진 장면)
+      if (mark === '??' && rv.verified[k] === false) mark = '';
+      m[k] = mark;
+    }
+    rv.marks = m;
+  }
+
+  function rvGo(k) { if (!rv) return; rv.k = Math.max(0, Math.min(rv.n, k)); render(); }
+
+  function rvExplain(k) {
+    // k: 다음에 둘 수의 번호(0부터). 현재 판 = states[k]
+    if (k >= rv.n) {
+      const o = rv.states[rv.n].over;
+      return o ? '대국 종료 — <b>' + esc(rv.names[o.winner]) + ' 승리</b>' + (o.reason === 'capture' ? ' (성 파괴)' : o.reason === 'resign' ? ' (기권)' : o.reason === 'count' ? ' (영토 계산)' : '') : '여기까지 둔 판이에요.';
+    }
+    const mv = rv.moves[k], a = rv.an[k], mark = rv.marks[k], nm = esc(rv.names[mv.p]);
+    let t = '<div style="font-size:12.5px;color:#a39876">' + (k + 1) + '수째 · ' + nm + '의 차례</div>' +
+      '<div style="font-size:17px;margin:2px 0 6px">둔 수: <b style="color:' + nameColor(mv.p) + '">' + fmtMove(mv) + '</b> ' +
+      (mark === '??' ? '<span style="color:#ff7a6a;font-weight:800">?? 결정적 실수</span>' : mark === '?' ? '<span style="color:#ffb27a;font-weight:800">? 승리를 놓침</span>' :
+        mark === '!' ? '<span style="color:#8fe39a;font-weight:800">! 좋은 수</span>' : '') + '</div>';
+    if (!a) return t + '<div style="color:#a39876">분석 중이에요…</div>';
+    const best = a.best >= 0 ? gkCoord(a.best) : null, same = a.best === mv.i;
+    if (mark === '??') t += '이 수 뒤로 <b>상대가 반드시 이기는 길</b>이 생겼어요.' + (best && !same ? ' 추천 수는 <b style="color:#f3d98b">' + best + '</b>였어요(금색 표시).' : '');
+    else if (mark === '?') t += '여기서는 <b>반드시 이기는 수</b>가 있었는데 놓쳤어요.' + (best ? ' 정답은 <b style="color:#f3d98b">' + best + '</b>!' : '');
+    else if (mark === '!') t += a.status === 'win' ? '<b>승리로 가는 정확한 수</b>예요.' : '좋은 수예요.';
+    else if (a.status === 'loss') t += '이미 상대가 이기는 흐름이었어요. 어떤 수를 둬도 막기 어려운 장면이에요.';
+    else if (a.status === 'win') t += '이 장면은 <b>' + nm + '이 이기는 길</b>이 있었어요.' + (best ? ' 추천: <b style="color:#f3d98b">' + best + '</b>' : '');
+    else t += same ? '엔진도 같은 수를 골랐어요. 👍' : (best ? '엔진 추천은 <b style="color:#f3d98b">' + best + '</b>예요. 큰 차이는 없는 장면이에요.' : '');
+    return t;
+  }
+
+  function renderReview() {
+    if (!rv) { view = 'game'; render(); return; }
+    const st = rv.states[rv.k], b = st.board, owner = gkTerritory(b);
+    const next = rv.k < rv.n ? rv.moves[rv.k] : null, a = rv.an[rv.k];
+    const destroyed = new Set(rv.k === rv.n && st.over ? (st.over.destroyed || []) : []);
+    const num = {}; rv.moves.slice(0, rv.k).forEach((m, j) => { if (m.i >= 0) num[m.i] = j + 1; });
+    const lastI = rv.k > 0 ? rv.moves[rv.k - 1].i : -1;
+    for (let i = 0; i < 81; i++) {
+      const el = cells[i], v = b[i], o = owner[i];
+      el.style.background = (v === GK_EMPTY && o) ? (o === 1 ? '#1f3566' : '#55311a') : '#2a251c';
+      el.style.cursor = 'default';
+      let inner = '';
+      if (v === GK_NEUTRAL) inner = piece(3);
+      else if (v) {
+        inner = '<div style="width:100%;height:100%">' + piece(v) + '</div>' +
+          '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:min(2.6vw,17px);text-shadow:0 0 3px #000,0 0 3px #000">' + (num[i] || '') + '</div>';
+        if (destroyed.has(i)) inner += '<svg viewBox="0 0 100 100" style="position:absolute;inset:0;width:100%;height:100%"><path d="M18 18 L82 82 M82 18 L18 82" stroke="#ff5a48" stroke-width="9" stroke-linecap="round" opacity=".85"/></svg>';
+        if (i === lastI) inner += '<div style="position:absolute;right:-3px;top:-3px;width:26%;height:26%;border-radius:50%;background:#f3d98b;border:2px solid #100e0a"></div>';
+      } else {
+        if (rv.showBest && a && a.best === i && next && next.i !== i) inner += '<div style="width:100%;height:100%;border-radius:16%;box-shadow:0 0 0 3px #f3d98b,0 0 14px 4px rgba(243,217,139,.7)">' + piece(next.p, 0.55) + '</div>';
+        if (next && next.i === i) inner += '<div style="position:absolute;inset:0;border-radius:16%;border:3px dashed ' + (rv.marks[rv.k] === '??' || rv.marks[rv.k] === '?' ? '#ff7a6a' : '#efe6cf') + '"></div>' +
+          '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:min(2.6vw,16px);color:' + nameColor(next.p) + '">' + (rv.k + 1) + '</div>';
+      }
+      el.innerHTML = inner ? '<div style="position:absolute;inset:6%">' + inner + '</div>' : '';
+    }
+    const doneN = rv.an.filter(Boolean).length;
+    rvHead.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-family:' + SERIF + ';font-size:20px;color:#d4af37;letter-spacing:3px">📊 복 기</span>' +
+      '<span style="font-size:13px;color:#a39876">' + rv.k + ' / ' + rv.n + '수</span></div>' +
+      (rv.done ? '<div style="font-size:12.5px;color:#8fe39a;margin-top:6px">분석 완료 · ←/→ 키로 한 수씩 볼 수 있어요</div>' :
+        '<div style="font-size:12.5px;color:#a39876;margin:6px 0 4px">' + (doneN < rv.n ? 'AI가 판을 분석하는 중… ' + doneN + ' / ' + rv.n : '승부처를 다시 확인하는 중…') + '</div>' +
+        '<div style="height:6px;background:#0e0c08;border-radius:3px;overflow:hidden"><div style="height:100%;width:' + (doneN / rv.n * 100) + '%;background:#d4af37"></div></div>');
+    rvInfo.innerHTML = rvExplain(rv.k) +
+      (rv.k < rv.n ? '<div style="font-size:12px;color:#8a7f63;margin-top:8px">점선 = 실제로 둔 수 · 금색 = 엔진 추천 수</div>' : '');
+    rvBestBtn.innerHTML = '추천 수 ' + (rv.showBest ? '<b style="color:#f3d98b">보기</b>' : '<span style="opacity:.6">숨기기</span>');
+    const keys = [];
+    rv.marks.forEach((mk, k) => { if (mk === '??' || mk === '?') keys.push(k); });
+    const firstWin = rv.marks.findIndex((mk, k) => mk === '!' && rv.an[k] && rv.an[k].status === 'win');
+    if (firstWin >= 0 && !keys.includes(firstWin)) keys.push(firstWin);
+    keys.sort((x, y) => x - y);
+    rvKeys.innerHTML = '<div style="font-size:13px;color:#d4af37;letter-spacing:2px;margin-bottom:8px">승부처</div>' +
+      (keys.length ? keys.map(k => {
+        const mk = rv.marks[k], mv = rv.moves[k];
+        const col = mk === '??' ? '#ff7a6a' : mk === '?' ? '#ffb27a' : '#8fe39a';
+        const lab = mk === '??' ? '결정적 실수' : mk === '?' ? '승리를 놓침' : '승리를 굳힌 수';
+        return '<div data-rk="' + k + '" class="gk-stage" style="cursor:pointer;padding:7px 9px;border:1px solid #3a3122;border-radius:8px;margin-bottom:6px;font-size:13.5px;background:' + (rv.k === k ? '#2a2210' : '#14110c') + '">' +
+          '<b style="color:' + col + '">' + mk + '</b> ' + (k + 1) + '수 <span style="color:' + nameColor(mv.p) + '">' + esc(rv.names[mv.p]) + '</span> <b>' + fmtMove(mv) + '</b>' +
+          ' <span style="color:#a39876;font-size:12px">· ' + lab + (rv.an[k] && rv.an[k].best >= 0 && rv.an[k].best !== mv.i ? ' (추천 ' + gkCoord(rv.an[k].best) + ')' : '') + '</span></div>';
+      }).join('') : '<div style="font-size:13px;color:#8a7f63">' + (rv.done ? '뚜렷한 결정적 장면이 없었어요. 형세 차이로 승부가 난 판이에요.' : '분석이 끝나면 여기에 표시돼요.') + '</div>');
+    rvKeys.querySelectorAll('[data-rk]').forEach(el => el.addEventListener('click', () => rvGo(+el.getAttribute('data-rk'))));
+    rvList.innerHTML = '<div style="font-size:13px;color:#d4af37;letter-spacing:2px;margin-bottom:8px">수순</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-height:170px;overflow-y:auto">' +
+      rv.moves.map((mv, k) => {
+        const mk = rv.marks[k] || '', col = mk === '??' ? '#ff7a6a' : mk === '?' ? '#ffb27a' : mk === '!' ? '#8fe39a' : '#6f6650';
+        return '<div data-mk="' + k + '" style="cursor:pointer;font-size:12.5px;padding:3px 5px;border-radius:5px;background:' + (rv.k === k ? '#3a2e14' : 'transparent') + '">' +
+          '<span style="color:#6f6650">' + (k + 1) + '.</span> <span style="color:' + nameColor(mv.p) + '">' + fmtMove(mv) + '</span> <b style="color:' + col + '">' + mk + '</b></div>';
+      }).join('') + '</div>';
+    rvList.querySelectorAll('[data-mk]').forEach(el => el.addEventListener('click', () => rvGo(+el.getAttribute('data-mk'))));
+  }
 
   /* =========================================================
      기보 이미지 저장
