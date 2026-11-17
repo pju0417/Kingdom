@@ -114,6 +114,45 @@ function gkThreats(b, attacker, stones) {
 }
 
 
+// 한 수 적용 (i: 칸 번호, -1 패스, -2 기권) → 새 상태. 온라인 동기화·재생에 사용
+function gkApply(S0, a) {
+  const S = JSON.parse(JSON.stringify(S0));
+  if (S.over) return S;
+  const p = (a.i === -2 && a.p) ? a.p : S.turn;
+  if (a.i === -2) {
+    S.moves.push({ p, i: -2 });
+    S.over = { winner: 3 - p, reason: 'resign', destroyed: [] };
+    return S;
+  }
+  if (a.i === -1) {
+    S.moves.push({ p, i: -1 });
+    S.passes++; S.lastMove = -1;
+    if (S.passes >= 2) {
+      const sc = gkScore(gkTerritory(S.board));
+      S.over = { winner: (sc[1] - sc[2] >= 3) ? GK_BLUE : GK_ORANGE, reason: 'count', score: sc, destroyed: [] };
+    } else S.turn = 3 - p;
+    return S;
+  }
+  const ev = gkEvaluate(S.board, a.i, p, S.stones);
+  if (!ev.ok) return null;
+  S.board[a.i] = p; S.stones[p]--; S.passes = 0; S.lastMove = a.i; S.moves.push({ p, i: a.i });
+  if (ev.kind === 'capture') S.over = { winner: p, reason: 'capture', destroyed: ev.captured };
+  else if (ev.kind === 'suicide') S.over = { winner: 3 - p, reason: 'suicide', destroyed: ev.captured };
+  else S.turn = 3 - p;
+  return S;
+}
+
+// 수 목록으로 처음부터 다시 둠 → { S, hist }
+function gkReplay(moves) {
+  let S = gkNew(); const hist = [];
+  for (const m of moves) {
+    const n = gkApply(S, { i: m.i, p: m.p });
+    if (!n) break;
+    hist.push(S); S = n;
+  }
+  return { S, hist };
+}
+
 var AI_ANCHOR = true;
 /* =========================================================
    GREAT KINGDOM — AI
@@ -682,7 +721,13 @@ function mountGreatKingdom(root) {
   const isUnlocked = k => k === 0 || !!cleared[k - 1] || !!cleared[k];
   const isAI = p => cfg.mode === 'ai' && p !== cfg.human;
   const aiTurn = () => !S.over && isAI(S.turn);
-  const who = p => GK_NAME[p] + (cfg.mode === 'ai' ? (isAI(p) ? '(AI)' : '(나)') : '');
+  let net = null;   // 온라인 연결 상태
+  const online = () => cfg.mode === 'online' && !!net;
+  const myTurnOnline = () => !online() || S.turn === net.myColor;
+  const who = p => {
+    if (online()) return p === net.myColor ? (net.myName || '나') + '(나)' : (net.oppName || '상대');
+    return GK_NAME[p] + (cfg.mode === 'ai' ? (isAI(p) ? '(AI)' : '(나)') : '');
+  };
 
   const h = (tag, style, html) => {
     const e = document.createElement(tag);
@@ -816,10 +861,36 @@ function mountGreatKingdom(root) {
   }
   const passBtn = mkBtn('패스 <span style="opacity:.5;font-size:12px">(P)</span>', pass, true);
   const undoBtn = mkBtn('↶ 무르기', undo);
+  const resignBtn = mkBtn('🏳 기권', () => resign());
   const terrBtn = mkBtn('', () => { showTerr = !showTerr; render(); });
   const rulesBtn = mkBtn('규칙 보기', showRules);
-  const newBtn = mkBtn('새 게임 / 설정', () => openSetup());
-  newBtn.style.gridColumn = '1 / 3';
+  const newBtn = mkBtn('새 게임 / 설정', () => { if (online()) { if (confirm('온라인 대전에서 나갈까요?')) { leaveOnline(); openSetup(); } } else openSetup(); });
+  btnRow.insertBefore(resignBtn, newBtn);
+  // 온라인 빠른 대화
+  const REACTS = ['👋 잘 부탁해!', '👍 좋은 수!', '😮 오!', '🤔 고민 중…', '😅 실수했다', '🤝 GG'];
+  const reactCard = h('div', card({ display: 'none', padding: '10px 12px' }));
+  reactCard.innerHTML = '<div style="font-size:12px;color:#a39876;letter-spacing:2px;margin-bottom:7px">빠른 대화</div>';
+  const reactGrid = h('div', { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' });
+  REACTS.forEach((t, k) => {
+    const b = h('button', { background: '#1d1912', color: '#efe6cf', border: '1px solid #5a4b2c', borderRadius: '8px', padding: '7px 2px',
+      fontSize: '12.5px', fontFamily: SANS, cursor: 'pointer' }, t);
+    b.className = 'gk-btn';
+    b.addEventListener('click', () => { if (!online() || !net.connected) return; netSend({ type: 'react', k }); toast(t, true); });
+    reactGrid.appendChild(b);
+  });
+  reactCard.appendChild(reactGrid);
+  gamePanel.insertBefore(reactCard, kifuCard);
+  // 알림 토스트
+  const toastEl = h('div', { position: 'fixed', top: '18px', left: '50%', transform: 'translateX(-50%)', zIndex: '60',
+    background: '#1f1a11', border: '1px solid #d4af37', borderRadius: '22px', padding: '10px 20px', fontSize: '16px',
+    color: '#f3d98b', boxShadow: '0 10px 30px rgba(0,0,0,.6)', display: 'none', pointerEvents: 'none' });
+  wrap.appendChild(toastEl);
+  let toastTimer = null;
+  function toast(t, mine) {
+    toastEl.innerHTML = (mine ? '<span style="color:#a39876;font-size:13px">나: </span>' : (online() ? '<span style="color:#a39876;font-size:13px">' + (net.oppName || '상대') + ': </span>' : '')) + t;
+    toastEl.style.display = 'block'; toastEl.style.animation = 'none'; void toastEl.offsetWidth; toastEl.style.animation = 'gkFade .25s ease-out';
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.style.display = 'none'; }, 2600);
+  }
   mkBtn.target = pzBtnRow;
   const pzHintBtn = mkBtn('💡 힌트', () => pzHint(), true);
   mkBtn('↺ 다시 하기', () => pzStart(pz.k));
@@ -873,6 +944,10 @@ function mountGreatKingdom(root) {
   function onCell(i) {
     if (view === 'practice') { pzClick(i); return; }
     if (S.over || aiTurn()) return;
+    if (online()) {
+      if (!net.connected) { note = '상대와 연결되지 않았어요. 잠시 기다려 주세요.'; render(); return; }
+      if (!myTurnOnline()) { note = '상대 차례예요.'; render(); return; }
+    }
     const ev = gkEvaluate(S.board, i, S.turn, S.stones);
     if (!ev.ok) { note = '✕ ' + ev.reason; render(); return; }
     if (ev.kind === 'suicide' && pendingSuicide !== i) {
@@ -884,13 +959,11 @@ function mountGreatKingdom(root) {
   }
 
   function doMove(i, ev) {
-    hist.push(clone(S));
+    const n = gkApply(S, { i });
+    if (!n) return;
+    hist.push(S); S = n;
     pendingSuicide = -1; note = '';
-    const p = S.turn;
-    S.board[i] = p; S.stones[p]--; S.passes = 0; S.lastMove = i; S.moves.push({ p, i });
-    if (ev.kind === 'capture') S.over = { winner: p, reason: 'capture', destroyed: ev.captured };
-    else if (ev.kind === 'suicide') S.over = { winner: 3 - p, reason: 'suicide', destroyed: ev.captured };
-    else S.turn = 3 - p;
+    if (online()) sendState();
     render();
     if (S.over) setTimeout(showResult, 450);
     else maybeAI();
@@ -898,27 +971,36 @@ function mountGreatKingdom(root) {
 
   function pass() {
     if (S.over || aiTurn()) return;
+    if (online() && (!net.connected || !myTurnOnline())) return;
     doPass();
   }
 
+  function passNote() {
+    const last = S.moves[S.moves.length - 1];
+    if (S.over || !last || last.i !== -1) return '';
+    const next = S.turn;
+    const meNext = (cfg.mode === 'ai' && !isAI(next)) || (online() && next === net.myColor);
+    return who(last.p) + '이 패스했습니다. ' + (meNext ? '나도' : GK_NAME[next] + '도') + ' 패스하면 게임이 끝나고 영토를 셉니다.';
+  }
+
   function doPass() {
-    hist.push(clone(S));
+    hist.push(S); S = gkApply(S, { i: -1 });
     pendingSuicide = -1;
-    S.moves.push({ p: S.turn, i: -1 });
-    S.passes++;
-    S.lastMove = -1;
-    if (S.passes >= 2) {
-      const sc = gkScore(gkTerritory(S.board));
-      S.over = { winner: (sc[1] - sc[2] >= 3) ? GK_BLUE : GK_ORANGE, reason: 'count', score: sc, destroyed: [] };
-      note = '';
-      render(); setTimeout(showResult, 300); return;
-    }
-    const next = 3 - S.turn;
-    note = who(S.turn) + '이 패스했습니다. ' + (cfg.mode === 'ai' && !isAI(next) ? '나도' : GK_NAME[next] + '도') +
-      ' 패스하면 게임이 끝나고 영토를 셉니다.';
-    S.turn = next;
+    if (online()) sendState();
+    if (S.over) { note = ''; render(); setTimeout(showResult, 300); return; }
+    note = passNote();
     render();
     maybeAI();
+  }
+
+  function resign() {
+    if (S.over) return;
+    if (!confirm('정말 기권할까요?')) return;
+    stopAI();
+    const me = online() ? net.myColor : (cfg.mode === 'ai' ? cfg.human : S.turn);
+    hist.push(S); S = gkApply(S, { i: -2, p: me });
+    if (online()) sendState();
+    render(); setTimeout(showResult, 300);
   }
 
   function maybeAI() {
@@ -940,6 +1022,11 @@ function mountGreatKingdom(root) {
 
   function undo() {
     if (!hist.length) return;
+    if (online()) {
+      if (!net.connected) return;
+      if (!S.moves.some(m => m.p === net.myColor)) return;
+      netSend({ type: 'undoReq' }); note = '상대에게 무르기를 요청했어요…'; render(); return;
+    }
     stopAI();
     S = hist.pop();
     // AI 대전: AI 수까지 함께 물러서 내 차례로
@@ -949,6 +1036,7 @@ function mountGreatKingdom(root) {
   }
 
   function reset() {
+    if (online()) { requestRematch(); return; }
     stopAI(); S = gkNew(); hist = []; pendingSuicide = -1; note = ''; closeModal(); render(); maybeAI();
   }
 
@@ -962,15 +1050,20 @@ function mountGreatKingdom(root) {
     function draw() {
       let html = '<div style="font-family:' + SERIF + ';color:#d4af37;font-size:22px;text-align:center;letter-spacing:3px">새 게임</div>' +
         sec('대전 방식') + '<div style="display:flex;gap:8px" data-g="mode">' +
-        chip(tmp.mode === 'pvp', '👥 2인 대전', '한 컴퓨터에서 둘이') + chip(tmp.mode === 'ai', '🤖 AI 대전', '컴퓨터와 대결') + '</div>';
+        chip(tmp.mode === 'pvp', '👥 2인 대전', '한 컴퓨터에서') + chip(tmp.mode === 'ai', '🤖 AI 대전', '컴퓨터와 대결') + chip(tmp.mode === 'online', '🌐 온라인', '다른 기기와 대결') + '</div>';
       if (tmp.mode === 'ai') {
         html += sec('AI 난이도') + '<div style="display:flex;gap:8px" data-g="level">' +
           chip(tmp.level === 'easy', '쉬움', '가끔 실수') + chip(tmp.level === 'normal', '보통', '두 수 앞') + chip(tmp.level === 'hard', '어려움', '수읽기') + chip(tmp.level === 'master', '고수', '깊은 수읽기') + '</div>' +
           sec('내 색') + '<div style="display:flex;gap:8px" data-g="human">' +
           chip(tmp.human === 1, '<span style="color:#8fa8ff">■</span> 파랑', '선공 · 3개 더 따야 승리') + chip(tmp.human === 2, '<span style="color:#ffa865">■</span> 주황', '후공 · AI가 먼저 둠') + '</div>';
       }
-      openModal(html, [['취소', closeModal], ['시작하기', () => { cfg = tmp; view = 'game'; reset(); }, true]], true);
-      const vals = { mode: ['pvp', 'ai'], level: ['easy', 'normal', 'hard', 'master'], human: [1, 2] };
+      if (tmp.mode === 'online') html += '<div style="margin-top:14px;font-size:13.5px;color:#a39876;line-height:1.6">방을 만들거나 친구의 방 코드를 입력해서 다른 컴퓨터·태블릿과 대결해요.</div>';
+      openModal(html, [['취소', closeModal], [tmp.mode === 'online' ? '다음 ▶' : '시작하기', () => {
+        if (tmp.mode === 'online') { openOnline(); return; }
+        if (online()) leaveOnline();
+        cfg = tmp; view = 'game'; reset();
+      }, true]], true);
+      const vals = { mode: ['pvp', 'ai', 'online'], level: ['easy', 'normal', 'hard', 'master'], human: [1, 2] };
       modal.querySelectorAll('[data-g]').forEach(row => {
         const key = row.getAttribute('data-g');
         Array.from(row.children).forEach((ch, k) => ch.addEventListener('click', () => { tmp[key] = vals[key][k]; draw(); }));
@@ -986,7 +1079,9 @@ function mountGreatKingdom(root) {
     if (o.reason === 'capture') {
       body = '<div style="font-size:15px;line-height:1.7;color:#d9cfb5">⚔️ ' + who(w) + '이 ' + who(l) + '의 성 <b style="color:#ff8a7a">' + o.destroyed.length + '개</b>를 포위해 파괴했습니다.</div>';
     } else if (o.reason === 'suicide') {
-      body = '<div style="font-size:15px;line-height:1.7;color:#d9cfb5">' + GK_NAME[l] + '의 성이 스스로 갇혀 파괴되었습니다.</div>';
+      body = '<div style="font-size:15px;line-height:1.7;color:#d9cfb5">' + who(l) + '의 성이 스스로 갇혀 파괴되었습니다.</div>';
+    } else if (o.reason === 'resign') {
+      body = '<div style="font-size:15px;line-height:1.7;color:#d9cfb5;text-align:center">🏳 ' + who(l) + '이 기권했습니다.</div>';
     } else {
       const d = o.score[1] - o.score[2];
       body =
@@ -1002,12 +1097,15 @@ function mountGreatKingdom(root) {
     }
     openModal(
       '<div style="text-align:center;font-family:' + SERIF + ';color:#a39876;letter-spacing:6px;font-size:13px">' +
-      (o.reason === 'count' ? '영 토 계 산' : '성 파 괴') + '</div>' +
+      (o.reason === 'count' ? '영 토 계 산' : o.reason === 'resign' ? '기 권' : '성 파 괴') + '</div>' +
       '<div style="text-align:center;margin:10px 0 4px"><div style="width:64px;margin:0 auto">' + piece(w) + '</div></div>' +
       '<div style="text-align:center;font-family:' + SERIF + ';font-size:30px;color:#d4af37;margin-bottom:14px;text-shadow:0 2px 12px rgba(212,175,55,.4)">' +
-      (cfg.mode === 'ai' ? (isAI(w) ? 'AI 승리' : '🎉 내가 이겼다!') : GK_NAME[w] + ' 승리!') + '</div>' +
+      (online() ? (w === net.myColor ? '🎉 내가 이겼다!' : (net.oppName || '상대') + ' 승리') :
+        cfg.mode === 'ai' ? (isAI(w) ? 'AI 승리' : '🎉 내가 이겼다!') : GK_NAME[w] + ' 승리!') + '</div>' +
       (cfg.mode === 'ai' ? '<div style="text-align:center;margin:-8px 0 14px;font-size:13px;color:#a39876">AI 난이도: ' + LEVEL_NAME[cfg.level] + '</div>' : '') + body,
-      [['판 보기', closeModal], ['↶ 무르기', undo], ['다시 하기', reset, true]]
+      online()
+        ? [['판 보기', closeModal], ['나가기', () => { leaveOnline(); closeModal(); openSetup(); }], ['다시 하기 (색 바꿔서)', requestRematch, true]]
+        : [['판 보기', closeModal], ['↶ 무르기', undo], ['다시 하기', reset, true]]
     );
   }
 
@@ -1032,6 +1130,7 @@ function mountGreatKingdom(root) {
   function onKey(e) {
     if (e.key === 'Escape') { closeModal(); return; }
     if (overlay.style.display === 'flex' || view !== 'game') return;
+    if (e.target && (e.target.tagName === 'INPUT')) return;
     if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undo(); return; }
     if (e.key === 'p' || e.key === 'P' || e.key === 'ㅔ') pass();
   }
@@ -1096,7 +1195,10 @@ function mountGreatKingdom(root) {
 
     // 차례 카드
     const modeLine = '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #2e2719;font-size:12px;color:#8a7f63">' +
-      (cfg.mode === 'ai' ? '🤖 AI 대전 · ' + LEVEL_NAME[cfg.level] + ' · 나는 <span style="color:' + nameColor(cfg.human) + '">' + GK_NAME[cfg.human] + '</span>' : '👥 2인 대전') + '</div>';
+      (online() ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:' + (net.connected ? '#5fd36b' : '#e0473a') +
+        ';box-shadow:0 0 6px ' + (net.connected ? '#5fd36b' : '#e0473a') + '"></span>🌐 온라인 · 방 <b style="color:#f3d98b;letter-spacing:1px">' + net.code + '</b> · ' +
+        (net.connected ? '연결됨' : '연결 끊김') :
+      cfg.mode === 'ai' ? '🤖 AI 대전 · ' + LEVEL_NAME[cfg.level] + ' · 나는 <span style="color:' + nameColor(cfg.human) + '">' + GK_NAME[cfg.human] + '</span>' : '👥 2인 대전') + '</div>';
     if (S.over) {
       turnCard.innerHTML =
         '<div style="display:flex;align-items:center;gap:14px"><div style="width:52px">' + piece(S.over.winner) + '</div>' +
@@ -1108,7 +1210,8 @@ function mountGreatKingdom(root) {
         '<div style="display:flex;align-items:center;gap:14px"><div style="width:52px;filter:drop-shadow(0 0 10px ' + (p === 1 ? 'rgba(80,120,255,.6)' : 'rgba(255,130,50,.6)') + ')">' + piece(p) + '</div>' +
         '<div style="flex:1"><div style="font-size:12px;color:#a39876;letter-spacing:3px">' + (S.moves.length + 1) + '수째 · 차례</div>' +
         '<div style="font-family:' + SERIF + ';font-size:24px;color:' + nameColor(p) + '">' + GK_NAME[p] + ' <span style="font-size:14px;color:#a39876">' +
-        (cfg.mode === 'ai' ? (ai ? 'AI' : '나') : (p === 1 ? '선공' : '후공')) + '</span></div>' +
+        (online() ? (p === net.myColor ? '나' : (net.oppName || '상대')) : cfg.mode === 'ai' ? (ai ? 'AI' : '나') : (p === 1 ? '선공' : '후공')) + '</span></div>' +
+        (online() && p !== net.myColor && net.connected ? '<div style="font-size:12.5px;color:#a39876;animation:gkBlink 1.4s ease-in-out infinite">상대가 생각 중…</div>' : '') +
         (ai && thinking ? '<div style="font-size:12.5px;color:#f3d98b;animation:gkBlink 1s ease-in-out infinite">🤖 생각 중…</div>' : '') + '</div>' +
         '<div style="text-align:right"><div style="font-size:11px;color:#a39876">남은 성</div><div style="font-family:' + SERIF + ';font-size:22px;color:#efe6cf">' + S.stones[p] + '</div></div></div>' + modeLine;
     }
@@ -1139,8 +1242,17 @@ function mountGreatKingdom(root) {
     noteBox.textContent = note;
 
     // 버튼
-    passBtn.disabled = !!S.over || aiTurn();
-    undoBtn.disabled = !hist.length;
+    passBtn.disabled = !!S.over || aiTurn() || (online() && (!myTurnOnline() || !net.connected));
+    undoBtn.disabled = !hist.length || (online() && (!net.connected || !S.moves.some(m => m.p === net.myColor)));
+    undoBtn.innerHTML = online() ? '↶ 무르기 요청' : '↶ 무르기';
+    resignBtn.disabled = !!S.over;
+    reactCard.style.display = online() ? 'block' : 'none';
+    newBtn.innerHTML = online() ? '나가기 / 새 게임' : '새 게임 / 설정';
+    if (online() && !net.connected && !S.over) {
+      alertBox.style.display = 'block';
+      alertBox.innerHTML = '<div style="font-family:' + SERIF + ';font-size:18px;color:#ff8a7a;margin-bottom:3px">📡 연결 끊김</div>' +
+        (net.started ? '상대와의 연결이 끊겼어요. 다시 접속하면 이어서 둘 수 있어요.' : '상대를 기다리는 중이에요.');
+    }
     terrBtn.innerHTML = '영토 표시 ' + (showTerr ? '<b style="color:#f3d98b">ON</b>' : '<span style="opacity:.6">OFF</span>');
 
     // 기보
@@ -1310,7 +1422,7 @@ function mountGreatKingdom(root) {
     openModal(
       '<div style="text-align:center;font-family:' + SERIF + ';color:#d4af37;font-size:24px;letter-spacing:4px;margin-bottom:6px">어서 오세요</div>' +
       '<div style="text-align:center;font-size:14px;color:#a39876;margin-bottom:6px">무엇을 할까요?</div>',
-      [['📘 연습모드', () => { openStageList(); }], ['⚔️ 대전하기', () => openSetup(), true]]
+      [['📘 연습모드', () => { openStageList(); }], ['🌐 온라인', () => openOnline()], ['⚔️ 대전하기', () => openSetup(), true]]
     );
   }
 
@@ -1374,9 +1486,308 @@ function mountGreatKingdom(root) {
       '<div style="height:8px;background:#0e0c08;border-radius:4px;overflow:hidden;border:1px solid #2e2719"><div style="height:100%;width:' + (n / tot * 100) + '%;background:linear-gradient(90deg,#8a7230,#f3d98b)"></div></div>';
   }
 
+
+  /* =========================================================
+     온라인 대전 (PeerJS · 브라우저끼리 직접 연결)
+     ========================================================= */
+  const PEER_PREFIX = 'gk-kingdom-v1-';
+  const PEER_SRC = ['https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js', 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js'];
+  const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let myName = '';
+  try { myName = localStorage.getItem('gkName') || ''; } catch (e) {}
+  const lsSet = (k, v) => { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch (e) {} };
+  const lsGet = k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } };
+  const esc = t => String(t || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function loadPeerLib() {
+    return new Promise((res, rej) => {
+      if (window.Peer) return res();
+      let k = 0;
+      const next = () => {
+        if (k >= PEER_SRC.length) return rej(new Error('PeerJS를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.'));
+        const sc = document.createElement('script');
+        sc.src = PEER_SRC[k++]; sc.onload = () => res(); sc.onerror = () => { sc.remove(); next(); };
+        document.head.appendChild(sc);
+      };
+      next();
+    });
+  }
+  const peerOpts = () => Object.assign({ debug: 0 }, window.GK_PEER_CONFIG || {});
+  const newCode = () => { let c = ''; for (let k = 0; k < 4; k++) c += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]; return c; };
+  const inviteLink = code => { try { return location.origin + location.pathname + '?room=' + code; } catch (e) { return ''; } };
+
+  function netSend(msg) { if (net && net.conn && net.conn.open) { try { net.conn.send(msg); } catch (e) {} } }
+  function saveSession() {
+    if (!net || !net.started) return;
+    lsSet('gkOnline', JSON.stringify({ role: net.role, code: net.code, myColor: net.myColor, myName: net.myName, oppName: net.oppName, v: net.v, game: net.game, moves: S.moves }));
+  }
+  function sendState() {
+    if (!net) return;
+    net.v++;
+    netSend({ type: 'state', moves: S.moves, v: net.v, game: net.game });
+    saveSession();
+  }
+  function loadMoves(moves) {
+    const r = gkReplay(moves || []);
+    S = r.S; hist = r.hist; pendingSuicide = -1;
+    note = passNote();
+  }
+
+  function startOnlineGame(myColor, moves, v, game) {
+    stopAI();
+    cfg = Object.assign({}, cfg, { mode: 'online' });
+    view = 'game';
+    net.myColor = myColor; net.v = v || 0; net.game = game || 1; net.started = true;
+    loadMoves(moves);
+    saveSession();
+    closeModal(); render();
+    if (S.over) setTimeout(showResult, 300);
+  }
+
+  function attachConn(c) {
+    c.on('open', () => {
+      if (!net) { c.close(); return; }
+      if (net.conn && net.conn !== c && net.conn.open) { try { c.send({ type: 'full' }); } catch (e) {} setTimeout(() => c.close(), 400); return; }
+      net.conn = c; net.connected = true; clearTimeout(net.joinTimer);
+      netSend({ type: 'hello', name: net.myName, ver: 1, role: net.role });
+      render();
+    });
+    c.on('data', d => onNetMsg(c, d));
+    c.on('close', () => onConnLost(c));
+    c.on('error', () => onConnLost(c));
+  }
+
+  function onConnLost(c) {
+    if (!net || net.conn !== c) return;
+    net.connected = false; net.conn = null;
+    render();
+    if (net.started) toast('📡 상대와 연결이 끊겼어요');
+    if (net.role === 'guest') scheduleRejoin();
+  }
+
+  function scheduleRejoin() {
+    if (!net || net.role !== 'guest' || net.rejoinTimer) return;
+    net.rejoinTimer = setTimeout(() => {
+      if (!net) return;
+      net.rejoinTimer = null;
+      if (!net.connected) { connectToHost(); scheduleRejoin(); }
+    }, 3000);
+  }
+
+  function onNetMsg(c, m) {
+    if (!net || !m || typeof m !== 'object') return;
+    if (m.type === 'full') { leaveOnline(); openOnline(null, '이 방은 이미 두 명이 대국 중이에요.'); return; }
+    if (c !== net.conn) return;
+    switch (m.type) {
+      case 'hello':
+        net.oppName = String(m.name || '').slice(0, 10);
+        if (net.role === 'host') {
+          if (!net.started) {
+            net.started = true;
+            startOnlineGame(net.myColor, [], 0, 1);
+            toast('🎉 ' + (net.oppName || '상대') + ' 님이 들어왔어요!');
+          }
+          netSend({ type: 'sync', hostColor: net.myColor, moves: S.moves, v: net.v, game: net.game });
+        }
+        render(); break;
+      case 'sync':
+        if (net.role !== 'guest') break;
+        if (!net.started) toast('🎉 대국 시작! ' + (m.hostColor === 1 ? '상대가 파랑(선공)' : '내가 파랑(선공)'));
+        startOnlineGame(3 - m.hostColor, m.moves, m.v, m.game);
+        break;
+      case 'state': {
+        if (m.game !== net.game || m.v < net.v) break;
+        const before = S.moves.length, wasOver = !!S.over;
+        net.v = m.v; loadMoves(m.moves); saveSession();
+        if (S.moves.length < before) note = '무르기가 반영됐어요.';
+        render();
+        if (S.over && !wasOver) setTimeout(showResult, 450);
+        break;
+      }
+      case 'undoReq':
+        openModal('<div style="text-align:center;font-size:40px">↶</div><div style="text-align:center;font-size:17px;color:#efe6cf;margin-top:6px"><b>' +
+          esc(net.oppName || '상대') + '</b> 님이 무르기를 요청했어요.</div><div style="text-align:center;font-size:13px;color:#a39876;margin-top:6px">수락하면 상대가 마지막으로 둔 수까지 되돌아가요.</div>',
+          [['거절', () => { netSend({ type: 'undoNo' }); closeModal(); }], ['수락', () => {
+            const opp = 3 - net.myColor;
+            if (hist.length && S.moves.some(x => x.p === opp)) {
+              S = hist.pop(); while (S.turn !== opp && hist.length) S = hist.pop();
+              note = '무르기를 수락했어요.'; sendState();
+            }
+            closeModal(); render();
+          }, true]]);
+        break;
+      case 'undoNo': note = '상대가 무르기를 거절했어요.'; render(); break;
+      case 'react': if (REACTS[m.k]) toast(REACTS[m.k]); break;
+      case 'rematchReq':
+        openModal('<div style="text-align:center;font-size:40px">🔄</div><div style="text-align:center;font-size:17px;color:#efe6cf;margin-top:6px"><b>' +
+          esc(net.oppName || '상대') + '</b> 님이 한 판 더 하자고 해요.</div><div style="text-align:center;font-size:13px;color:#a39876;margin-top:6px">색을 바꿔서 새 대국을 시작해요.</div>',
+          [['다음에', () => { netSend({ type: 'rematchNo' }); closeModal(); }], ['좋아요!', () => { netSend({ type: 'rematchOk' }); if (net.role === 'host') beginRematch(); closeModal(); }, true]]);
+        break;
+      case 'rematchOk': if (net.role === 'host') beginRematch(); break;
+      case 'rematchNo': note = '상대가 다시 하기를 거절했어요.'; render(); break;
+      case 'bye':
+        net.connected = false; net.started = false; render();
+        openModal('<div style="text-align:center;font-size:40px">👋</div><div style="text-align:center;font-size:17px;color:#efe6cf;margin-top:6px">' + esc(net.oppName || '상대') + ' 님이 방을 나갔어요.</div>',
+          [['판 보기', closeModal], ['새 게임', () => { leaveOnline(); openSetup(); }, true]]);
+        break;
+    }
+  }
+
+  function beginRematch() {
+    if (!net || net.role !== 'host') return;
+    net.myColor = 3 - net.myColor; net.game++; net.v = 0;
+    startOnlineGame(net.myColor, [], 0, net.game);
+    netSend({ type: 'sync', hostColor: net.myColor, moves: [], v: 0, game: net.game });
+    toast('🔄 새 대국! 나는 ' + GK_NAME[net.myColor]);
+  }
+  function requestRematch() {
+    if (!online() || !net.connected) { note = '상대와 연결되어 있지 않아요.'; render(); return; }
+    netSend({ type: 'rematchReq' }); note = '상대에게 다시 하기를 요청했어요…'; closeModal(); render();
+  }
+
+  function leaveOnline() {
+    if (!net) return;
+    netSend({ type: 'bye' });
+    const n = net; net = null;
+    clearTimeout(n.joinTimer); clearTimeout(n.rejoinTimer);
+    setTimeout(() => { try { n.conn && n.conn.close(); } catch (e) {} try { n.peer && n.peer.destroy(); } catch (e) {} }, 300);
+    lsSet('gkOnline', null);
+    cfg = Object.assign({}, cfg, { mode: 'ai' });
+    S = gkNew(); hist = []; note = '';
+    render();
+  }
+
+  function openPeer(id, onReady, onFail, tries) {
+    const peer = id ? new window.Peer(id, peerOpts()) : new window.Peer(peerOpts());
+    net.peer = peer;
+    peer.on('open', () => onReady(peer));
+    peer.on('connection', c => { if (net && net.role === 'host') attachConn(c); });
+    peer.on('disconnected', () => { if (net && net.peer === peer && !peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch (e) {} }, 1500); });
+    peer.on('error', err => {
+      const t = err && err.type;
+      if (t === 'unavailable-id' && (tries || 0) < 12) {
+        try { peer.destroy(); } catch (e) {}
+        if (!net) return;
+        if (net.resuming) setTimeout(() => { if (net) openPeer(id, onReady, onFail, (tries || 0) + 1); }, 3000);
+        else { net.code = newCode(); openPeer(PEER_PREFIX + net.code, onReady, onFail, (tries || 0) + 1); }
+        return;
+      }
+      if (t === 'peer-unavailable') { if (net && net.role === 'guest' && !net.started) onFail('방 <b>' + esc(net.code) + '</b>을(를) 찾을 수 없어요. 코드를 확인해 주세요.'); return; }
+      if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') { if (net && !net.started) onFail('연결 서버에 접속하지 못했어요. 잠시 후 다시 시도해 주세요.'); return; }
+      if (t === 'browser-incompatible') onFail('이 브라우저는 온라인 대전을 지원하지 않아요.');
+    });
+  }
+
+  function connectToHost() {
+    if (!net || !net.peer || net.peer.destroyed) return;
+    const c = net.peer.connect(PEER_PREFIX + net.code, { reliable: true });
+    attachConn(c);
+  }
+
+  async function hostRoom(colorPick, resume) {
+    try { await loadPeerLib(); } catch (e) { openOnline(null, e.message); return; }
+    const myColor = colorPick === 0 ? (Math.random() < 0.5 ? 1 : 2) : colorPick;
+    net = { role: 'host', code: resume ? resume.code : newCode(), myName, oppName: resume ? resume.oppName : '', myColor: resume ? resume.myColor : myColor,
+      v: resume ? resume.v : 0, game: resume ? resume.game : 1, connected: false, started: false, resuming: !!resume };
+    if (resume) { cfg = Object.assign({}, cfg, { mode: 'online' }); net.started = true; loadMoves(resume.moves); render(); }
+    else showWaiting();
+    openPeer(PEER_PREFIX + net.code, () => { if (net) { net.resuming = false; if (!net.started) showWaiting(); else render(); } },
+      msg => { leaveOnline(); openOnline(null, msg); });
+  }
+
+  async function joinRoom(code, resume) {
+    try { await loadPeerLib(); } catch (e) { openOnline(code, e.message); return; }
+    net = { role: 'guest', code, myName, oppName: resume ? resume.oppName : '', myColor: resume ? resume.myColor : 0,
+      v: resume ? resume.v : 0, game: resume ? resume.game : 1, connected: false, started: false };
+    if (resume) { cfg = Object.assign({}, cfg, { mode: 'online' }); net.started = true; loadMoves(resume.moves); render(); }
+    else openModal('<div style="text-align:center;font-size:36px">🔗</div><div style="text-align:center;font-size:16px;color:#efe6cf;margin-top:6px">방 <b style="color:#f3d98b;letter-spacing:2px">' + esc(code) +
+      '</b>에 연결하는 중…</div>', [['취소', () => { leaveOnline(); openOnline(); }]]);
+    const fail = msg => { if (!net || net.started) return; const c = net.code; leaveOnline(); openOnline(c, msg); };
+    openPeer(null, () => {
+      connectToHost();
+      if (!resume) net.joinTimer = setTimeout(() => { if (net && !net.connected) fail('방 <b>' + esc(code) + '</b>에 연결하지 못했어요. 코드를 확인하거나 잠시 후 다시 시도해 주세요.'); }, 12000);
+      else scheduleRejoin();
+    }, fail);
+  }
+
+  function showWaiting() {
+    if (!net) return;
+    const link = inviteLink(net.code);
+    openModal('<div style="text-align:center;font-family:' + SERIF + ';color:#d4af37;font-size:20px;letter-spacing:3px">방을 만들었어요</div>' +
+      '<div style="text-align:center;font-size:13px;color:#a39876;margin:10px 0 6px">친구에게 방 코드를 알려 주세요</div>' +
+      '<div style="text-align:center;font-family:' + SERIF + ';font-size:52px;letter-spacing:14px;color:#f3d98b;text-shadow:0 2px 16px rgba(212,175,55,.45);padding-left:14px">' + net.code + '</div>' +
+      '<div style="text-align:center;font-size:13.5px;color:#d9cfb5;margin-top:8px">나는 <b style="color:' + nameColor(net.myColor) + '">' + GK_NAME[net.myColor] + '</b>' + (net.myColor === 1 ? ' (선공)' : ' (후공)') + '</div>' +
+      (link ? '<div style="margin-top:14px;background:#14110c;border:1px solid #3a3122;border-radius:8px;padding:8px 10px;font-size:12px;color:#a39876;word-break:break-all;text-align:center">' + esc(link) + '</div>' : '') +
+      '<div style="text-align:center;margin-top:14px;font-size:14px;color:#f3d98b;animation:gkBlink 1.4s ease-in-out infinite">' + (net.peer && net.peer.open ? '상대를 기다리는 중…' : '방을 여는 중…') + '</div>',
+      [['나가기', () => { leaveOnline(); closeModal(); }], ['🔗 초대 링크 복사', () => {
+        try { navigator.clipboard.writeText(link).then(() => toast('링크를 복사했어요', true)); } catch (e) { toast('복사가 안 되면 링크를 직접 알려 주세요'); }
+      }, true]]);
+  }
+
+  function openOnline(prefill, err) {
+    stopAI();
+    const tmp = { color: 1, code: (prefill || '').toUpperCase() };
+    const inp = 'width:100%;box-sizing:border-box;background:#14110c;border:1px solid #5a4b2c;border-radius:9px;padding:11px 12px;color:#efe6cf;font-size:16px;font-family:' + SANS + ';outline:none';
+    const chip = (on, label) => '<div style="flex:1;cursor:pointer;text-align:center;padding:9px 4px;border-radius:9px;border:1px solid ' + (on ? '#d4af37' : '#3a3122') +
+      ';background:' + (on ? '#3a2e14' : '#14110c') + ';color:' + (on ? '#f3d98b' : '#cfc5aa') + ';font-size:14px;font-weight:' + (on ? 700 : 500) + '">' + label + '</div>';
+    function draw() {
+      openModal('<div style="font-family:' + SERIF + ';color:#d4af37;font-size:22px;text-align:center;letter-spacing:3px">🌐 온라인 대전</div>' +
+        (err ? '<div style="margin-top:12px;background:#2a0f0c;border:1px solid #e0473a;border-radius:8px;padding:9px 12px;font-size:13.5px;color:#ffd6d0">' + err + '</div>' : '') +
+        '<div style="font-size:12px;color:#a39876;letter-spacing:3px;margin:16px 0 6px">내 이름</div>' +
+        '<input id="gkName" maxlength="10" placeholder="예: 3반 재욱" value="' + esc(myName) + '" style="' + inp + '">' +
+        '<div style="display:flex;gap:12px;margin-top:16px">' +
+        '<div style="flex:1;background:#14110c;border:1px solid #3a3122;border-radius:12px;padding:12px">' +
+        '<div style="font-size:15px;color:#f3d98b;font-weight:700;margin-bottom:8px">방 만들기</div>' +
+        '<div style="font-size:12px;color:#a39876;margin-bottom:6px">내 색</div><div style="display:flex;gap:5px" id="gkColor">' +
+        chip(tmp.color === 1, '파랑') + chip(tmp.color === 2, '주황') + chip(tmp.color === 0, '무작위') + '</div>' +
+        '<button id="gkHost" class="gk-btn" style="margin-top:10px;width:100%;background:#3a2e14;color:#f3d98b;border:1px solid #d4af37;border-radius:9px;padding:10px;font-size:15px;font-weight:700;font-family:' + SANS + ';cursor:pointer">방 만들기</button></div>' +
+        '<div style="flex:1;background:#14110c;border:1px solid #3a3122;border-radius:12px;padding:12px">' +
+        '<div style="font-size:15px;color:#f3d98b;font-weight:700;margin-bottom:8px">방 참가</div>' +
+        '<div style="font-size:12px;color:#a39876;margin-bottom:6px">방 코드 (4자리)</div>' +
+        '<input id="gkCode" maxlength="4" placeholder="ABCD" value="' + esc(tmp.code) + '" style="' + inp + ';text-transform:uppercase;letter-spacing:6px;text-align:center;font-size:20px;padding:7px">' +
+        '<button id="gkJoin" class="gk-btn" style="margin-top:10px;width:100%;background:#3a2e14;color:#f3d98b;border:1px solid #d4af37;border-radius:9px;padding:10px;font-size:15px;font-weight:700;font-family:' + SANS + ';cursor:pointer">참가하기</button></div></div>' +
+        '<div style="font-size:12px;color:#8a7f63;margin-top:12px;line-height:1.6">같은 방 코드를 입력하면 다른 컴퓨터·태블릿과 대결할 수 있어요. 대화는 정해진 문구로만 주고받아요.</div>',
+        [['닫기', closeModal]], true, true);
+      const nameIn = modal.querySelector('#gkName'), codeIn = modal.querySelector('#gkCode');
+      const keep = () => { myName = nameIn.value.trim().slice(0, 10); tmp.code = codeIn.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4); try { localStorage.setItem('gkName', myName); } catch (e) {} };
+      nameIn.addEventListener('input', keep); codeIn.addEventListener('input', () => { keep(); codeIn.value = tmp.code; });
+      Array.from(modal.querySelector('#gkColor').children).forEach((ch, k) => ch.addEventListener('click', () => { keep(); tmp.color = [1, 2, 0][k]; err = ''; draw(); }));
+      modal.querySelector('#gkHost').addEventListener('click', () => {
+        keep(); if (!myName) { err = '이름을 먼저 입력해 주세요.'; draw(); return; }
+        if (net) leaveOnline(); hostRoom(tmp.color);
+      });
+      modal.querySelector('#gkJoin').addEventListener('click', () => {
+        keep(); if (!myName) { err = '이름을 먼저 입력해 주세요.'; draw(); return; }
+        if (tmp.code.length !== 4) { err = '방 코드 4자리를 입력해 주세요.'; draw(); return; }
+        if (net) leaveOnline(); joinRoom(tmp.code);
+      });
+    }
+    draw();
+  }
+
+  window.addEventListener('beforeunload', () => saveSession());
+
+  function startup() {
+    let saved = null;
+    try { saved = JSON.parse(lsGet('gkOnline') || 'null'); } catch (e) {}
+    let roomParam = '';
+    try { roomParam = (new URLSearchParams(location.search).get('room') || '').toUpperCase().slice(0, 4); } catch (e) {}
+    if (saved && saved.code && (!roomParam || roomParam === saved.code)) {
+      openModal('<div style="text-align:center;font-size:36px">🌐</div><div style="text-align:center;font-size:16px;color:#efe6cf;margin-top:6px">방 <b style="color:#f3d98b;letter-spacing:2px">' + esc(saved.code) +
+        '</b>에서 하던 온라인 대전이 있어요.</div>',
+        [['그만하기', () => { lsSet('gkOnline', null); closeModal(); openHome(); }], ['이어서 하기', () => {
+          myName = saved.myName || myName; closeModal();
+          if (saved.role === 'host') hostRoom(saved.myColor, saved); else joinRoom(saved.code, saved);
+        }, true]]);
+      return;
+    }
+    if (roomParam) { openOnline(roomParam); return; }
+    openHome();
+  }
+
   render();
-  openHome();
-  return () => { stopAI(); window.removeEventListener('keydown', onKey); root.innerHTML = ''; };
+  startup();
+  return () => { stopAI(); if (net) leaveOnline(); window.removeEventListener('keydown', onKey); root.innerHTML = ''; };
 }
 
 mountGreatKingdom(document.getElementById("app"));
