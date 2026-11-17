@@ -1565,7 +1565,7 @@ function mountGreatKingdom(root) {
     // 수 목록
     x.fillStyle = '#d4af37'; x.font = '15px ' + KR; x.fillText('수 순   (' + S.moves.length + '수)', rx, 346);
     x.strokeStyle = '#3a3122'; x.lineWidth = 1; x.beginPath(); x.moveTo(rx, 356); x.lineTo(rx + rw, 356); x.stroke();
-    const cols = 4, rows = 20, cw = rw / cols;
+    const cols = 5, rows = 17, cw = rw / cols;
     S.moves.slice(0, cols * rows).forEach((m, k) => {
       const cx = rx + Math.floor(k / rows) * cw, cy = 378 + (k % rows) * 18.5;
       x.fillStyle = '#6f6650'; x.font = '13px ' + KS; x.fillText((k + 1) + '.', cx, cy);
@@ -1573,10 +1573,10 @@ function mountGreatKingdom(root) {
       x.fillStyle = '#efe6cf'; x.font = 'bold 13px ' + KS;
       x.fillText(m.i === -1 ? '패스' : m.i === -2 ? '기권' : gkCoord(m.i), cx + 60, cy);
     });
-    if (S.moves.length > cols * rows) { x.fillStyle = '#a39876'; x.font = '12px ' + KS; x.fillText('… 외 ' + (S.moves.length - cols * rows) + '수', rx, H - 74); }
+    if (S.moves.length > cols * rows) { x.fillStyle = '#a39876'; x.font = '12px ' + KS; x.fillText('… 외 ' + (S.moves.length - cols * rows) + '수', rx, H - 66); }
     // 바닥글
     x.textAlign = 'left'; x.fillStyle = '#6f6650'; x.font = '12.5px ' + KS;
-    x.fillText('숫자 = 둔 순서  ·  색칠된 빈칸 = 영토  ·  ✕ = 파괴된 성', rx, H - 52);
+    x.fillText('숫자 = 둔 순서  ·  색칠된 빈칸 = 영토  ·  ✕ = 파괴된 성', rx, H - 42);
     return cv;
   }
 
