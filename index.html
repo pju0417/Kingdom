@@ -191,7 +191,11 @@ function aiCandidates(b, p) {
 }
 
 // 형세 평가 (me 입장, 클수록 유리)
+// 형세 판단 가중치 (자체 대국으로 조정)
+var AI_W = { inf: 0.3, infDiv: 6, imm: 1.2, immPer: 0.25, l1me: -2.5, l1op: 1.2, l2me: -1.2, l2op: 0.7, l3: -0.35, pot: 0, potEdge: 0 };
+
 function aiEval(b, me) {
+  const W = AI_W;
   const owner = gkTerritory(b), opp = 3 - me, infl = new Float32Array(81);
   for (let i = 0; i < 81; i++) {
     const v = b[i];
@@ -211,7 +215,17 @@ function aiEval(b, me) {
     if (b[i] !== GK_EMPTY) continue;
     if (owner[i] === me) s += 1;
     else if (owner[i] === opp) s -= 1;
-    else s += 0.45 * Math.max(-1, Math.min(1, infl[i] / 6));
+    else {
+      s += W.inf * Math.max(-1, Math.min(1, infl[i] / W.infDiv));
+      if (W.pot) {
+        // 한 수만 더 두면 영토가 되는 빈칸 (= 불사 기지 후보)
+        const r = (i / 9) | 0, c = i % 9;
+        let walls = (r === 0) + (r === 8) + (c === 0) + (c === 8), mine = 0, theirs = 0, empty = 0;
+        for (const k of gkNbrs(i)) { const v = b[k]; if (v === GK_NEUTRAL) walls++; else if (v === me) mine++; else if (v === opp) theirs++; else empty++; }
+        if (empty === 1 && mine && !theirs && mine + walls === 3) s += W.pot - (walls ? W.potEdge : 0);
+        else if (empty === 1 && theirs && !mine && theirs + walls === 3) s -= W.pot - (walls ? W.potEdge : 0);
+      }
+    }
   }
   const seen = new Uint8Array(81);
   for (let i = 0; i < 81; i++) {
@@ -224,11 +238,11 @@ function aiEval(b, me) {
       // 내 영토에 닿은 무리 = 절대 파괴되지 않는 기지
       let immortal = false;
       for (const L of g.libs) if (owner[L] === v) { immortal = true; break; }
-      if (immortal) { s += sg * (1.2 + 0.25 * g.stones.length); continue; }
+      if (immortal) { s += sg * (W.imm + W.immPer * g.stones.length); continue; }
       const n = g.libs.size;
-      if (n === 1) s += v === me ? -2.5 : 1.2;
-      else if (n === 2) s += v === me ? -0.8 : 0.5;
-      else if (n === 3) s += sg * -0.15;
+      if (n === 1) s += v === me ? W.l1me : W.l1op;
+      else if (n === 2) s += v === me ? W.l2me : W.l2op;
+      else if (n === 3) s += sg * W.l3;
     } else {
       const n = g.libs.size;
       if (n === 1) s += v === me ? -2 : 1;
@@ -322,6 +336,9 @@ function aiEasy2(b, me) {
   return aiPick(out);
 }
 
+// 예전 난이도 이름 → 새 단계
+var AI_LEVEL_ALIAS = { easy: 'l2', normal: 'l4', hard: 'l6', master: 'l7' };
+
 // 반환: 둘 칸 번호, 패스면 -1
 function aiChooseMove(S, me, level) {
   const b = S.board;
@@ -330,9 +347,13 @@ function aiChooseMove(S, me, level) {
     const sc = gkScore(gkTerritory(b));
     if (((sc[1] - sc[2] >= 3) ? GK_BLUE : GK_ORANGE) === me) return -1; // 지금 끝내면 이김 → 패스
   }
+  level = AI_LEVEL_ALIAS[level] || level;
   let m;
-  if (level === 'hard' || level === 'master') m = srChoose(b, me, AI_LEVELS[level]);
-  else m = (level === 'easy' ? aiEasy2 : aiHard)(b, me);
+  if (AI_LEVELS[level]) m = srChoose(b, me, AI_LEVELS[level]);
+  else if (level === 'l1') m = aiEasy(b, me);
+  else if (level === 'l2') m = aiEasy2(b, me);
+  else if (level === 'l3') m = aiNormal(b, me);
+  else m = aiHard(b, me);
   if (!m) return -1;
   if (S.moves.length > 20 && (m.v == null || m.v > -500)) {
     const after = aiApply(b, m.i, me);
@@ -531,10 +552,14 @@ function srChoose(b, p, opt) {
   return res;
 }
 
+// 5~8단계: 수읽기 + 사활 확인 (1~4단계는 ai_old.js의 간단한 AI)
 const AI_LEVELS = {
-  hard:   { maxDepth: 4, width: 8,  rootWidth: 14, qdepth: 6, sqDepth: 2, timeMs: 1000, lifeMs: 600,  lifeN: 3, safeN: 2 },
-  master: { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 8, sqDepth: 3, timeMs: 2000, lifeMs: 1400, lifeN: 4, safeN: 3 }
+  l5: { maxDepth: 2, width: 8,  rootWidth: 12, qdepth: 4, sqDepth: 1, timeMs: 200,  lifeMs: 0 },
+  l6: { maxDepth: 4, width: 8,  rootWidth: 14, qdepth: 6, sqDepth: 2, timeMs: 900,  lifeMs: 600,  lifeN: 3, safeN: 2 },
+  l7: { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 8, sqDepth: 3, timeMs: 1800, lifeMs: 1200, lifeN: 4, safeN: 3 },
+  l8: { maxDepth: 6, width: 10, rootWidth: 20, qdepth: 8, sqDepth: 3, timeMs: 1800, lifeMs: 3000, lifeN: 5, safeN: 4 }
 };
+AI_LEVELS.hard = AI_LEVELS.l6; AI_LEVELS.master = AI_LEVELS.l7;
 
 /* ---------- 사활 판단: 무리를 끝까지 몰아 잡을 수 있는가 ---------- */
 // 이 게임은 '영토에 닿으면 불사', '하나라도 파괴되면 즉시 패배'이므로
@@ -915,8 +940,11 @@ function mountGreatKingdom(root) {
   const SANS = "'Pretendard','Apple SD Gothic Neo','Malgun Gothic','Noto Sans KR',sans-serif";
 
   let S = gkNew(), hist = [], showTerr = true, hover = -1, pendingSuicide = -1, note = '';
-  let cfg = { mode: 'ai', level: 'normal', human: 1 }, aiTimer = null, thinking = false;
-  const LEVEL_NAME = { easy: '쉬움', normal: '보통', hard: '어려움', master: '고수' };
+  let cfg = { mode: 'ai', level: 'l4', human: 1 }, aiTimer = null, thinking = false;
+  const LEVELS = [['l1', '1 입문', '처음 배울 때'], ['l2', '2 초급', '가끔 실수'], ['l3', '3 하수', '한 수 앞'], ['l4', '4 중수', '두 수 앞'],
+    ['l5', '5 상수', '수읽기'], ['l6', '6 고수', '사활 판단'], ['l7', '7 달인', '깊은 수읽기'], ['l8', '8 최강', '최고 단계']];
+  const LEVEL_NAME = { easy: '2 초급', normal: '4 중수', hard: '6 고수', master: '7 달인' };
+  LEVELS.forEach(([k, n]) => { LEVEL_NAME[k] = n; });
   const CH_NAME = { 1: '영토 만들기', 2: '공성', 3: '방어', 4: '전술', 5: '영토 전략', 6: '불사 기지' };
   let view = 'game';
   let pz = null;
@@ -1285,8 +1313,9 @@ function mountGreatKingdom(root) {
         sec('대전 방식') + '<div style="display:flex;gap:8px" data-g="mode">' +
         chip(tmp.mode === 'pvp', '👥 2인 대전', '한 컴퓨터에서') + chip(tmp.mode === 'ai', '🤖 AI 대전', '컴퓨터와 대결') + chip(tmp.mode === 'online', '🌐 온라인', '다른 기기와 대결') + '</div>';
       if (tmp.mode === 'ai') {
-        html += sec('AI 난이도') + '<div style="display:flex;gap:8px" data-g="level">' +
-          chip(tmp.level === 'easy', '쉬움', '가끔 실수') + chip(tmp.level === 'normal', '보통', '두 수 앞') + chip(tmp.level === 'hard', '어려움', '수읽기') + chip(tmp.level === 'master', '고수', '깊은 수읽기') + '</div>' +
+        html += sec('AI 난이도 (8단계)') + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px" data-g="level">' +
+          LEVELS.map(([k, n, d]) => chip(tmp.level === k, n, d)).join('') + '</div>' +
+          '<div style="font-size:11.5px;color:#8a7f63;margin-top:6px">위 단계일수록 생각이 길어요 (7단계 약 3초, 8단계 약 5초)</div>' +
           sec('내 색') + '<div style="display:flex;gap:8px" data-g="human">' +
           chip(tmp.human === 1, '<span style="color:#8fa8ff">■</span> 파랑', '선공 · 3개 더 따야 승리') + chip(tmp.human === 2, '<span style="color:#ffa865">■</span> 주황', '후공 · AI가 먼저 둠') + '</div>';
       }
@@ -1296,7 +1325,7 @@ function mountGreatKingdom(root) {
         if (online()) leaveOnline();
         cfg = tmp; view = 'game'; reset();
       }, true]], true);
-      const vals = { mode: ['pvp', 'ai', 'online'], level: ['easy', 'normal', 'hard', 'master'], human: [1, 2] };
+      const vals = { mode: ['pvp', 'ai', 'online'], level: LEVELS.map(x => x[0]), human: [1, 2] };
       modal.querySelectorAll('[data-g]').forEach(row => {
         const key = row.getAttribute('data-g');
         Array.from(row.children).forEach((ch, k) => ch.addEventListener('click', () => { tmp[key] = vals[key][k]; draw(); }));
